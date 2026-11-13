@@ -1,0 +1,237 @@
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import QtQuick.Layouts 1.15
+
+// Charged Up ESC status and drive-mode settings for VESC Tool.
+Item {
+    id: root
+    anchors.fill: parent
+
+    property string ver: "-"
+    property int mode: 1
+    property bool light: false
+    property bool cruise: false
+    property real canAge: -1
+    property real bleAge: -1
+    property bool ready: false
+    property bool kids: false
+    property int kidMph: 0
+    property int kidWatts: 0
+    property bool statusSeen: false
+    property int statusAge: 0
+    property string nextRepl: ""
+    property bool replBusy: false
+    property int replWait: 0
+    property var pendingModes: []
+    property bool modeDirty: false
+
+    property var modeValues: []
+    property string modeMessage: "Read the controller's mode table before editing."
+    property var modeFields: [
+        {label: "Reverse speed (km/h)", index: 0, speed: true},
+        {label: "Reverse drive (%)", index: 1, speed: false},
+        {label: "Reverse brake (%)", index: 2, speed: false},
+        {label: "Neutral brake (%)", index: 3, speed: false},
+        {label: "Mode 1 speed (km/h)", index: 4, speed: true},
+        {label: "Mode 1 drive (%)", index: 5, speed: false},
+        {label: "Mode 1 brake (%)", index: 6, speed: false},
+        {label: "Mode 2 speed (km/h)", index: 7, speed: true},
+        {label: "Mode 2 drive (%)", index: 8, speed: false},
+        {label: "Mode 2 brake (%)", index: 9, speed: false},
+        {label: "Mode 3 speed (km/h)", index: 10, speed: true},
+        {label: "Mode 3 drive (%)", index: 11, speed: false},
+        {label: "Mode 3 brake (%)", index: 12, speed: false}
+    ]
+    function readModes() {
+        if (replBusy) return
+        pendingModes = []
+        modeDirty = false
+        nextRepl = "(base-modes-status)"
+        replBusy = true; replWait = 0
+        modeMessage = "Reading the controller..."
+    }
+    function saveModes() {
+        if (replBusy || modeValues.length !== 13) return
+        var values = []
+        for (var i = 0; i < modeEditor.count; i++) {
+            var row = modeEditor.itemAt(i)
+            var value = Number(row.input.text)
+            var speed = modeFields[i].speed
+            // Explicit validation also works in the companion app's QML renderer,
+            // where Qt's acceptableInput property is not implemented.
+            if (row.input.text.trim().length === 0 || !isFinite(value) ||
+                    value < (speed ? 1 : 0) || value > (speed ? 250 : 100)) {
+                modeMessage = "Check " + modeFields[i].label.toLowerCase() + "."
+                return
+            }
+            values.push(modeFields[i].speed ? value : value / 100)
+        }
+        modeMessage = "Saving and reading back..."
+        pendingModes = values
+        nextRepl = "(save-modes-checked '(" + modeValues.join(" ") + ") '(" + values.join(" ") + "))"
+        replBusy = true; replWait = 0
+    }
+
+    function tick() {
+        statusAge++
+        if (statusAge > 4) statusSeen = false
+        // One REPL request per tick: status polling must not cause a button
+        // request to be discarded by the firmware's 0.5 s REPL rate limit.
+        if (nextRepl.length > 0) {
+            var command = nextRepl; nextRepl = ""
+            try {
+                VescIf.commands().lispSendReplCmd(command)
+                // Saving reapplies limits through a native command, replacing
+                // the reply callback. Readback needs its own fresh request.
+                if (command.indexOf("(save-modes-checked ") === 0)
+                    nextRepl = "(base-modes-status)"
+            }
+            catch (e) { replBusy = false; pendingModes = []; modeMessage = "No connection. Read the modes again." }
+        } else if (replBusy) {
+            replWait++
+            if (replWait >= 4) {
+                replBusy = false; pendingModes = []
+                modeMessage = "No readback received. Your changes are not confirmed."
+            }
+        } else {
+            try { VescIf.commands().lispSendReplCmd(modeDirty ? "(base-status)" : "(progn (base-status) (base-modes-status))") } catch (e) {}
+        }
+    }
+
+    function modeName(m) {
+        return m === 0 ? "Reverse" : m === 1 ? "Neutral" : "Mode " + (m - 1)
+    }
+    function heard(age) {
+        if (age < 0) return "never"
+        if (age < 2) return "now"
+        return Math.round(age) + " s ago"
+    }
+
+    Timer {
+        interval: 1000; running: true; repeat: true; triggeredOnStart: true
+        onTriggered: root.tick()
+    }
+
+    Connections {
+        target: VescIf.commands()
+        // the line is ("base" "1.0" mode light cruise can-age ble-age); taken
+        // apart without quote characters, which the iOS app's QML reader
+        // would take for the start of a string
+        function onLispPrintReceived(str) {
+            var table = str.indexOf("base-modes")
+            if (table >= 0) {
+                var words = str.substring(table + 10).replace(/[fiu]32/g, "").replace(/[^0-9.eE+\- ]/g, " ").trim().split(/\s+/)
+                if (words.length !== 13) return
+                var values = []
+                for (var i = 0; i < 13; i++) {
+                    var value = Number(words[i])
+                    var speed = i === 0 || i === 4 || i === 7 || i === 10
+                    if (!isFinite(value) || value < (speed ? 1 : 0) || value > (speed ? 250 : 1)) return
+                    values.push(value)
+                }
+                if (pendingModes.length === 13) {
+                    var match = true
+                    for (var j = 0; j < 13; j++) if (Math.abs(values[j] - pendingModes[j]) > 0.0001) match = false
+                    if (match) {
+                        modeValues = values
+                        modeDirty = false
+                        modeMessage = "Modes saved and confirmed by the controller."
+                    } else {
+                        modeMessage = "The controller did not confirm these limits. Your edits are still shown."
+                    }
+                } else if (!modeDirty) {
+                    modeValues = values
+                    modeMessage = "Showing the mode table read from the controller."
+                }
+                pendingModes = []; replBusy = false; replWait = 0
+                return
+            }
+            var k = str.indexOf("base")
+            if (k < 0) return
+            var p = str.substring(k + 5).replace(/[()]/g, " ").replace(/[fiu]32/g, "").trim().split(/\s+/)
+            if (p.length < 6) return
+            if (!isFinite(Number(p[1])) || Number(p[1]) < 0 || Number(p[1]) > 4 ||
+                    !isFinite(parseFloat(p[4])) || !isFinite(parseFloat(p[5]))) return
+            ver = p[0].replace(/[^a-zA-Z0-9.-]/g, "")
+            mode = parseInt(p[1])
+            light = p[2] !== "0"
+            cruise = p[3] !== "0"
+            canAge = parseFloat(p[4])
+            bleAge = parseFloat(p[5])
+            statusSeen = true; statusAge = 0
+            if (p.length >= 10) {
+                ready = p[6] === "1"; kids = p[7] === "1"
+                kidMph = parseInt(p[8]); kidWatts = parseInt(p[9])
+            }
+        }
+    }
+
+    ScrollView {
+        anchors.fill: parent
+        clip: true
+        ColumnLayout {
+        width: root.width - 24
+        x: 12
+        spacing: 8
+
+        Label { text: "CU Core ESC"; font.bold: true; font.pixelSize: 18 }
+        Label { Layout.fillWidth: true; wrapMode: Text.WordWrap
+            text: "Package version: {{VERSION}} • Device build: " + ver }
+        Label {
+            Layout.fillWidth: true; wrapMode: Text.WordWrap; color: "#9aa0aa"
+            text: "Drive modes enforce current and speed limits. Neutral blocks drive current. Kids limits stay active if the display disconnects. Set each mode's power and speed below or in the Charged Up iOS app."
+        }
+        GridLayout {
+            columns: 2; columnSpacing: 16; rowSpacing: 6
+            Label { text: "Display on CAN" }
+            Label { text: statusSeen ? heard(canAge) : "Waiting for controller" }
+            Label { text: "Display on Bluetooth" }
+            Label { text: statusSeen ? heard(bleAge) : "Waiting for controller" }
+            Label { text: "Drive profiles" }
+            Label { text: !statusSeen ? "Waiting for controller" : ready ? "Active" : "Profiles inactive: check current scale, wheel size and gearing, then power-cycle"; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+            Label { text: "Kids limits" }
+            Label { text: !statusSeen ? "--" : kids ? kidMph + " mph / " + kidWatts + " W" : "Off" }
+            Label { text: "Mode" }
+            Label { text: statusSeen ? modeName(mode) : "--" }
+            Label { text: "Light" }
+            Label { text: !statusSeen ? "--" : light ? "on" : "off" }
+            Label { text: "Cruise" }
+            Label { text: !statusSeen ? "--" : cruise ? "on" : "off" }
+        }
+        Label { text: "Drive-mode limits"; font.bold: true }
+        Label {
+            Layout.fillWidth: true; wrapMode: Text.WordWrap
+            text: "Speeds are km/h. Drive and brake percentages scale the controller's configured current limits. Kids caps can lower these limits further."
+        }
+        RowLayout {
+            Button { text: "Read modes"; enabled: !replBusy; onClicked: root.readModes() }
+            Button { text: "Save modes"; enabled: modeValues.length === 13 && !replBusy; onClicked: root.saveModes() }
+        }
+        Label { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: modeMessage }
+        Repeater {
+            id: modeEditor
+            model: root.modeFields
+            RowLayout {
+                Layout.fillWidth: true
+                property alias input: valueInput
+                Label { Layout.fillWidth: true; text: modelData.label }
+                TextField {
+                    id: valueInput
+                    Layout.preferredWidth: 95
+                    enabled: root.modeValues.length === 13 && !root.replBusy
+                    text: root.modeValues.length === 13 ? (root.modeValues[modelData.index] * (modelData.speed ? 1 : 100)).toFixed(2) : ""
+                    onTextEdited: root.modeDirty = true
+                    inputMethodHints: Qt.ImhFormattedNumbersOnly
+                    validator: DoubleValidator {
+                        bottom: modelData.speed ? 1 : 0
+                        top: modelData.speed ? 250 : 100
+                        decimals: 2
+                        notation: DoubleValidator.StandardNotation
+                        locale: "C"
+                    }
+                }
+            }
+        }
+        }
+    }
+}

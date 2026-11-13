@@ -1,0 +1,9 @@
+Copyright 2026 Jeremy Maddox
+
+Charged Up's original code and modifications are licensed under the GNU
+General Public License, version 3 or (at your option) any later version.
+See LICENSE.txt for the full terms. Existing third-party code retains its
+original copyright and license notices.
+
+Font assets retain their separate SIL OFL-1.1 and Apache-2.0 licenses.
+See FONT-NOTICES.txt and font/licenses/ for the authors and full terms.

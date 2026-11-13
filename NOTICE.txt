@@ -1,0 +1,25 @@
+Charged Up VESC Packages v1
+Copyright 2026 Jeremy Maddox
+
+Charged Up's original code, modifications and build tools are licensed under
+the GNU General Public License, version 3 or (at your option) any later
+version. See LICENSE.txt for the full terms. Existing third-party code keeps
+its original copyright and license notices.
+
+CU Wheelie is based on Wheelie Assist 1.0.0 by 3ShulMotors, licensed under
+GPL-3.0. Charged Up adds external IMU support, source selection, connection
+handling and the Charged Up interface.
+https://3shulmotors.com
+
+The native VESC interface header, vesc_c_if.h, is Copyright 2022 Benjamin
+Vedder, licensed under GPL-3.0-or-later. Its original notice is retained in
+each copy. CU Core ESC's Motor Wizard presets follow VESC Tool's SetupWizardFoc.qml.
+https://github.com/vedderb/vesc_tool/blob/53dd253c9e3b60a38584d776d4dadcc14b51b0a4/mobile/SetupWizardFoc.qml
+
+Thanks to Benjamin Vedder and the VESC and LispBM contributors.
+https://github.com/vedderb/vesc_pkg
+https://github.com/svenssonjoel/lispBM
+
+Dash's Montserrat and Rajdhani fonts are licensed under SIL OFL-1.1.
+Its Material Symbols subset is licensed under Apache-2.0. The fonts keep
+those licenses; see cu_dash/FONT-NOTICES.txt and cu_dash/font/licenses/.

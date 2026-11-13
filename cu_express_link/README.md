@@ -1,0 +1,50 @@
+# CU Express Link
+
+Connect a VESC Express T already wired to your bike's CAN bus to a Charged Up
+CUP-3.5 screen. This package runs on the Express T using stock firmware.
+
+## What you need
+
+- **VESC Express T** running stock **VESC Express 7.00**.
+- CAN wiring to the motor controller, with matching baud rates and a different
+  CAN ID for each device. UART-only wiring is not supported.
+- A CUP-3.5 screen on the same radio channel. The default is channel 1.
+
+## Install and connect
+
+1. Connect VESC Tool to the Express T and confirm its hardware name.
+2. Back up any existing package, then install `cu_express_link.vescpkg` through
+   **VESC Packages**.
+3. Power-cycle the Express T. Leave automatic controller discovery on for a
+   single-controller bike.
+4. Find and select the link on the CUP-3.5. The link remembers the paired screen.
+5. Open the package page to check the controller and screen connections.
+
+Connection changes take effect after a power cycle. On a dual-controller bike,
+check both selected CAN IDs. To pair a different screen, turn the old screen
+off and use **Forget paired screen**.
+
+## Controller features
+
+Express Link carries controller telemetry, mode commands, kids limits,
+Wheelie status and supported setup commands between the controller and screen.
+It can also carry telemetry from a compatible CAN BMS.
+
+CU Core ESC or CU Wheelie runs separately on the motor controller. That package
+provides its mode and setup features; Express Link supplies the connection.
+Standard VESC telemetry is available without either controller package.
+
+Express Link does not add an IMU, light outputs, ANT reader or IO-hat controls.
+
+## Connection problems
+
+Check CAN wiring, power, baud rate and device IDs in VESC Tool. The screen and
+Express T must use the same radio channel. A Wi-Fi station connection can
+change the Express T's channel; disconnect it while using the screen link.
+
+If the link remembers another screen, turn that screen off and forget its
+pairing before trying again.
+
+## License
+
+GPL-3.0-or-later. See `LICENSE.txt` and `NOTICE.txt` for terms and credits.

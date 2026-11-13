@@ -1,0 +1,12 @@
+Copyright 2026 Jeremy Maddox
+
+Charged Up's original code and modifications are licensed under the GNU
+General Public License, version 3 or (at your option) any later version.
+See LICENSE.txt for the full terms. Existing third-party code retains its
+original copyright and license notices.
+
+The VESC native interface header, vesc_c_if.h, is Copyright 2022 Benjamin
+Vedder and licensed under GPL-3.0-or-later. Its original notice is retained.
+
+Motor Wizard presets follow VESC Tool:
+https://github.com/vedderb/vesc_tool/blob/53dd253c9e3b60a38584d776d4dadcc14b51b0a4/mobile/SetupWizardFoc.qml

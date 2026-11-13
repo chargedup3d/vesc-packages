@@ -1,0 +1,16 @@
+*.vescpkg
+*.rcc
+/vesc_pkg_all.rcc.*
+*.o
+*.elf
+__pycache__/
+.DS_Store
+/*/ui.qml
+/*/version.lisp
+/*/README-gen.md
+# The partner flasher is private and is not part of this repository.
+*.[hH][tT][mM][lL]
+*.[hH][tT][mM]
+*.[xX][hH][tT][mM][lL]
+*.[mM][hH][tT][mM][lL]
+*.[mM][hH][tT]

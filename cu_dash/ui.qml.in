@@ -1,0 +1,1308 @@
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import QtQuick.Layouts 1.15
+// The objects the host hands back are not usable until their types are
+// registered in this file's import scope: commands() returns a Commands,
+// and Connections cannot resolve onLispPrintReceived on a type the engine
+// has not been told about. Every other package ships these three lines.
+// VescIf is a singleton registered by this module, not a free-standing
+// context property. Without the import it resolves on desktop VESC Tool,
+// which also sets it on the root context, and not on mobile, which does
+// not - so the same page worked on a cable and threw "VescIf is not
+// defined" on a phone. The probe below reported "context: Utility",
+// which is the tell: Utility was there because its module was imported
+// and VescIf was not because its module was not.
+import Vedder.vesc.vescinterface 1.0
+import Vedder.vesc.utility 1.0
+import Vedder.vesc.commands 1.0
+import Vedder.vesc.configparams 1.0
+
+Item {
+    anchors.fill: parent
+
+    property var bikeActModel: ["Nothing","Mode up","Mode down","Mode cycle","Next page","Previous page","Home page","Toggle mode chip","Signal left","Signal right","Hazards","Headlight","Horn","Cruise","Reset trip","Night mode","Reverse","Brighter","Dimmer","Walk assist","Hold reverse","Choose controller","Release for VESC Tool","BMS link on/off","Mode 1","Mode 2","Mode 3","Neutral","Link lights off","Link brake light","Controller logging","CU Wheelie arm"]
+    // Keep numeric action IDs stable while showing their Cart behavior.
+    property var actModel: bikeActModel.slice()
+    function refreshActionLabels(cart) {
+        var boxes = [aUpS, aUpL, aDnS, aDnL, a3S, a3L]
+        var selected = boxes.map(function (box) { return box ? box.currentIndex : -1 })
+        var a = bikeActModel.slice()
+        if (cart) {
+            a[8] = "Mode up"; a[9] = "Mode down"
+            a[10] = "Choose controller"; a[11] = "BMS link on/off"
+            a[16] = "Mode cycle"
+            a[13] = "Nothing (Cart mode)"; a[19] = "Nothing (Cart mode)"
+            a[20] = "Nothing (Cart mode)"; a[31] = "Nothing (Cart mode)"
+        }
+        actModel = a
+        // A replaced ComboBox model may reset its selection; retain action IDs.
+        for (var i = 0; i < boxes.length; i++) {
+            if (boxes[i]) boxes[i].currentIndex = selected[i]
+        }
+    }
+    property var srcModel: ["Speed","Motor temp","Controller temp","Amps","Battery volts","Charge %","Power kW","Duty","Pack temp","Trip","Odometer","Efficiency","Energy Wh","Amp hours","Fault","Off","Motor 2 temp","Ctrl 2 temp","Amps 2","Amps total","Motor max","Ctrl max","Peak amps","Charged Wh","Pitch","Battery amps"]
+    property var colModel: ["White","Green","Cyan","Blue","Red","Yellow","Magenta","Orange"]
+    property bool loading: false
+    // the Cart layout is picked in the orientation shown
+    property bool cartLayout: vert.checked ? vstyleBox.currentIndex === 6 : styleBox.currentIndex === 6
+    property var cfgParts: []
+    property bool touched: false
+    property var colVals: [16777215,65280,65535,255,16711680,16776960,16711935,16744448]
+    // the cart screen's own palette, in its order, so a display set up
+    // here matches one of the Arduino carts rather than merely resembling it
+    // and eight more (2026-10-24), each checked on the panel under the cart
+    // layout both ways up and under Instrument with the theme on: all dark
+    // enough for the white numbers and the bright readings to keep their
+    // contrast. After the Arduino five, so a saved choice keeps its place.
+    property var themeModel: ["Black","Slate","Plum","Forest","Burgundy","Navy","Royal","Teal","Indigo","Olive","Espresso","Rust","Graphite"]
+    property var themeVals: [0,1976635,2955581,993823,2953498,925509,1780331,733238,2365002,2502162,2825492,3872268,2829875]
+
+    // Every change saves itself, a moment after the last one. Changes used
+    // to go live on the display and stay only until it was switched off
+    // unless Save was pressed - and nobody presses Save: a new background
+    // came back as the old one after a power cycle (2026-10-06). One save
+    // takes about a third of a second, so a burst of changes is one save.
+    Timer { id: saveLater; interval: 1500; repeat: false
+        onTriggered: { send("(cfg-save)"); status.text = "saved" } }
+
+    // The interface object, found once rather than named blindly.
+    //
+    // VescIf is a context property, and which properties the host sets
+    // differs between builds: on VESC Tool mobile every call through VescIf
+    // came back "ReferenceError: VescIf is not defined" while the same UI
+    // worked on the desktop over USB. Rather than assume a name, try the
+    // ones a VESC Tool is known to set and keep whichever answers, so a
+    // build that spells it differently still gets a working settings page.
+    property var vesc: null
+    property string ctxNote: ""
+
+    function findVesc() {
+        var tries = [
+            ["VescIf",  function() { return VescIf }],
+            ["QmlUi",   function() { return QmlUi }],
+            ["Utility", function() { return Utility }]
+        ]
+        var found = []
+        var pick = null
+        for (var i = 0; i < tries.length; i++) {
+            try {
+                var o = tries[i][1]()
+                if (o !== undefined && o !== null) {
+                    found.push(tries[i][0])
+                    if (pick === null && o.commands !== undefined) pick = o
+                }
+            } catch (e) { /* not defined in this build */ }
+        }
+        ctxNote = "context: " + (found.length ? found.join(" ") : "none")
+        return pick
+    }
+
+    function cmds() {
+        if (vesc === null) return null
+        try { return vesc.commands() } catch (e) { return null }
+    }
+
+    // Commands go out through a queue. The display drops, without a word, a
+    // REPL command that arrives within half a second of the one before (the
+    // firmware's own guard), so a size change's (refonts) right after its
+    // (def ...) never ran, and holding + on a spin box left the screen on
+    // whichever step happened to get through while this page showed the
+    // last - and the save a moment later kept the screen's (2026-10-24).
+    // What is sent together goes as one (progn ...), at most every 0.6 s. A
+    // refresher already waiting moves to the back instead of going twice,
+    // and a newer (def x ...) replaces one still waiting, so the last value
+    // is the one that lands and a (refonts) always comes after it.
+    property var sendQ: []
+    property double sentAt: 0
+    Timer { id: sendTick; interval: 30; repeat: false; onTriggered: flushQ() }
+
+    function send(c) {
+        var m = c.match(/^\(def (\S+) /)
+        // only a refresher with no arguments, like (refonts), is merged; two
+        // taps of an action with one, like (btn-run 4), are two actions
+        var bare = /^\(\S+\)$/.test(c)
+        var q = sendQ.filter(function (p) { return !(bare && p === c) && !(m && p.indexOf("(def " + m[1] + " ") === 0) })
+        q.push(c)
+        sendQ = q
+        if (!sendTick.running) {
+            sendTick.interval = Math.max(30, 600 - (Date.now() - sentAt))
+            sendTick.start()
+        }
+        // and the page's commands that set cfg- values themselves: a preset,
+        // Vertical, Flip 180 and Hardware buttons never saved on their own,
+        // so they were lost at power off unless something else came after
+        if (/^\((def cfg-|preset |vpreset |set-vertical |set-flip |set-btn-en |set-cart-mode )/.test(c)) saveLater.restart()
+    }
+
+    function flushQ() {
+        if (sendQ.length === 0) return
+        // as many as fit in one command; the REPL takes about 500 bytes
+        var q = sendQ, batch = [], len = 8
+        while (q.length > 0 && (batch.length === 0 || len + q[0].length + 1 < 480)) {
+            var c = q.shift(); batch.push(c); len += c.length + 1
+        }
+        sendQ = q
+        var cmd = batch.length === 1 ? batch[0] : "(progn " + batch.join(" ") + ")"
+        var cm = cmds()
+        if (cm === null) { status.text = "no VESC interface - " + ctxNote; sendQ = []; return }
+        try { cm.lispSendReplCmd(cmd) }
+        catch (e) { status.text = "error: " + e + " - " + ctxNote; sendQ = []; return }
+        sentAt = Date.now()
+        if (sendQ.length > 0) { sendTick.interval = 600; sendTick.start() }
+    }
+    function setv(n,v) { touched = true; send("(def " + n + " " + v + ")") }
+    function setf(n,v) { touched = true; send("(def " + n + " " + v + ".0)") }
+
+    // Read-back is isolated in a Loader: if onLispPrintReceived is not the
+    // right signal on this VESC Tool build, only this fails and the rest of
+    // the page still renders.
+    Loader {
+        id: rb
+        active: false
+        sourceComponent: Component {
+            Item {
+                Timer { interval: 1800; running: true; repeat: false
+                        onTriggered: send("(cfg-dump)") }
+                Connections {
+                    // through the same lookup as everything else, so a
+                    // build that does not expose VescIf loses the
+                    // read-back rather than throwing on every frame
+                    target: cmds()
+                    function onLispPrintReceived(str) {
+                        var vb = str.indexOf("VBLIST:")
+                        if (vb >= 0) {
+                            var raw = str.substring(vb + 7).trim()
+                            var out = []
+                            var parts = raw.split(";")
+                            for (var k = 0; k < parts.length; k++) {
+                                if (parts[k].length < 5) continue
+                                var f = parts[k].split(",")
+                                var nm = (f[1] && f[1] !== "?") ? f[1] : "unknown"
+                                out.push(f[0] + "   " + nm + "   " + f[2] + " dBm")
+                            }
+                            out.sort(function(a, b) {
+                                var av = a.indexOf("VESC") >= 0 ? 0 : 1
+                                var bv = b.indexOf("VESC") >= 0 ? 0 : 1
+                                return av - bv
+                            })
+                            vbList.model = out
+                            vbStatus.text = out.length + " devices"
+                            return
+                        }
+
+                        // the dump arrives in numbered chunks, since one long
+                        // line gets truncated on the way through the console
+                        if (str.indexOf("THEMEOUT:") >= 0) {
+                            themeCode.text = str.substring(str.indexOf("THEMEOUT:") + 9).trim()
+                            themeCode.selectAll()
+                            themeStatus.text = "this display's theme - copy it"
+                            return
+                        }
+                        if (str.indexOf("THEME:") >= 0) {
+                            var tm = str.substring(str.indexOf("THEME:") + 6).trim()
+                            themeStatus.text = tm === "ok" ? "theme imported and saved"
+                                                           : "not imported: " + tm
+                            themeStatus.color = tm === "ok" ? "#6c6" : "#e66"
+                            return
+                        }
+
+                        var cm = str.match(/CFG(\d):/)
+                        if (cm) {
+                            var idx = parseInt(cm[1])
+                            var body = str.substring(str.indexOf(cm[0]) + cm[0].length).trim()
+                            if (idx === 0) cfgParts = []
+                            cfgParts[idx] = body
+                            var all = []
+                            for (var q = 0; q < cfgParts.length; q++) {
+                                if (cfgParts[q] === undefined) return
+                                all = all.concat(cfgParts[q].split(","))
+                            }
+                            if (all.length < 100) return
+                            applyCfg(all)
+                            return
+                        }
+                    }
+
+                    function applyCfg(v) {
+                        if (v.length < 100) { status.text = "short config"; return }
+                        loading = true
+                        var n = function(k){ return parseInt(v[k]) }
+                        var f = function(k){ return Math.round(parseFloat(v[k])) }
+                        var ci = function(k){
+                            var t = parseInt(v[k])
+                            for (var j = 0; j < colVals.length; j++)
+                                if (colVals[j] === t) return j
+                            return 0
+                        }
+                        var ti = function(k){
+                            var t = parseInt(v[k])
+                            for (var j = 0; j < themeVals.length; j++)
+                                if (themeVals[j] === t) return j
+                            return 0
+                        }
+                        arcSrc.currentIndex=n(0)
+                        arcMin.value=f(1)
+                        arcMax.value=f(2)
+                        tlSrc.currentIndex=n(3)
+                        tlMin.value=f(4)
+                        tlMax.value=f(5)
+                        trSrc.currentIndex=n(6)
+                        trMin.value=f(7)
+                        trMax.value=f(8)
+                        s6Src.currentIndex=n(68)
+                        s6Min.value=f(69)
+                        s6Max.value=f(70)
+                        s7Src.currentIndex=n(71)
+                        s7Min.value=f(72)
+                        s7Max.value=f(73)
+                        s8Src.currentIndex=n(74)
+                        s8Min.value=f(75)
+                        s8Max.value=f(76)
+                        s6Col.currentIndex=ci(77)
+                        s7Col.currentIndex=ci(78)
+                        s8Col.currentIndex=ci(79)
+                        blSrc.currentIndex=n(9)
+                        blMin.value=f(10)
+                        blMax.value=f(11)
+                        brSrc.currentIndex=n(12)
+                        brMin.value=f(13)
+                        brMax.value=f(14)
+                        barFill.currentIndex=n(16)
+                        barMin.value=f(17)
+                        barMax.value=f(18)
+                        uSpeed.currentIndex=n(19)
+                        uTemp.currentIndex=n(20)
+                        uDist.currentIndex=n(21)
+                        dmot.value=n(94)
+                        dbat.value=n(95)
+                        dspd.value=n(96)
+                        dbrk.value=n(97)
+                        fontFam.currentIndex=n(91)
+                        bgCol.currentIndex=ti(92)
+                        accCol.currentIndex=ti(93)
+                        fsSm.value=n(24)
+                        fsLg.value=n(25)
+                        fsXl.value=n(26)
+                        hz.value=f(28)
+                        tlCol.currentIndex=ci(31)
+                        trCol.currentIndex=ci(32)
+                        blCol.currentIndex=ci(33)
+                        brCol.currentIndex=ci(34)
+                        arcCol.currentIndex=ci(35)
+                        cValue.currentIndex=ci(36)
+                        cUnit.currentIndex=ci(37)
+                        m1mot.value=n(38)
+                        m1bat.value=n(39)
+                        m2mot.value=n(40)
+                        m2bat.value=n(41)
+                        m3mot.value=n(42)
+                        m3bat.value=n(43)
+                        styleBox.currentIndex=n(44)
+                        vstyleBox.currentIndex=n(45)
+                        iconBox.currentIndex=n(46)
+                        lblMain.currentIndex=n(47)
+                        lblSlot.currentIndex=n(48)
+                        btnUp.value=n(49)
+                        btnDn.value=n(50)
+                        btn3.value=n(51)
+                        aUpS.currentIndex=n(52)
+                        aUpL.currentIndex=n(53)
+                        aDnS.currentIndex=n(54)
+                        aDnL.currentIndex=n(55)
+                        a3S.currentIndex=n(56)
+                        a3L.currentIndex=n(57)
+                        if (v.length > 101) whlPage.currentIndex = n(101)
+                        // Common pin and icon size were never read back, so
+                        // the boxes always showed 7 and 26 and one nudge wrote
+                        // a pin over whatever the screen really had
+                        if (v.length > 103) { btnGnd.value = n(102); iconSize.value = n(103) }
+                        modePos.currentIndex=n(58) + 1
+                        modeSize.value=n(59)
+                        modeDx.value=n(60)
+                        modeDy.value=n(61)
+                        chanBox.value=n(63)
+                        stX.value=n(64)
+                        stY.value=n(65)
+                        p2Style.currentIndex=n(66)
+                        barCol.currentIndex=ci(67)
+                        m1spd.value=n(84)
+                        m2spd.value=n(85)
+                        m3spd.value=n(86)
+                        m1brk.value=n(87)
+                        m2brk.value=n(88)
+                        m3brk.value=n(89)
+                        kidMph.value=f(82)
+                        kidW.value=f(83)
+                        blStep.value=n(90)
+                        blDay.value=Math.round(parseFloat(v[80]) * 100)
+                        blNight.value=Math.round(parseFloat(v[81]) * 100)
+                        escId.value=n(29)
+                        var sb=n(22)
+                        cruiseCancel.checked=(sb & 131072) !== 0
+                        modeStrip.checked=(sb & 1024) !== 0
+                        esc2En.checked=(sb & 2048) !== 0
+                        statusOn.checked=(sb & 4096) !== 0
+                        btnEn.checked=(sb & 512) !== 0
+                        p2Show.checked=(sb & 128) !== 0
+                        autoChg.checked=(sb & 65536) !== 0
+                        splashOn.checked=(sb & 524288) !== 0
+                        revEn.checked=(sb & 1048576) === 0   // stored inverted
+                        simpleMode.checked=(sb & 2097152) !== 0
+                        dEn.checked=n(98) === 1
+                        themeAll.checked=n(99) === 1
+                        // The direct Bluetooth flag was the one setting this
+                        // page could write but never read: cfg-dump did not
+                        // carry it, so the box rendered unchecked even on a
+                        // dash that was using the link - which it always is
+                        // once a controller has been picked on screen, since
+                        // vb-use turns it on.
+                        vbEn.checked=n(100) === 1
+                        vert.checked=n(23) === 1
+                        flip2.checked=n(30) === 1
+                        loading = false
+                        status.text = "read from display"
+                    }
+                }
+            }
+        }
+    }
+
+    Component.onCompleted: {
+        vesc = findVesc()
+        status.text = (cmds() === null ? "NO INTERFACE - " : "ready - ") + ctxNote
+        rb.active = true
+    }
+
+    ScrollView {
+        anchors.fill: parent
+        contentWidth: availableWidth
+        clip: true
+
+        ColumnLayout {
+            width: parent.width
+            spacing: 6
+
+            Label { text: "CU Dash"; font.bold: true; font.pointSize: 16 }
+            Label { text: "Package version: {{VERSION}}" }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Label { text: "Editing"; Layout.preferredWidth: 56 }
+                ComboBox { id: pageSel
+                    Layout.fillWidth: true; Layout.preferredHeight: 40
+                    model: ["Dash page","Ride page","Charging","Hardware"] }
+                Button { text: "Read"; Layout.preferredHeight: 40
+                    onClicked: { touched = false; send("(cfg-dump)") } }
+                Button { text: "Save"; Layout.preferredHeight: 40
+                    onClicked: { send("(cfg-save)"); status.text = "saved" } }
+            }
+            Label { id: status; text: ""; color: "#6c6"; font.pointSize: 9
+                    Component.onCompleted: {
+                        var cm = cmds()
+                        text = (cm === null ? "NO INTERFACE - " : "ready - ") + ctxNote
+                    } }
+
+            // ---------------- DASH PAGE ----------------
+            GroupBox {
+                Layout.fillWidth: true
+                visible: pageSel.currentIndex === 0
+                title: "Layout"
+                ColumnLayout {
+                    anchors.fill: parent
+                    RowLayout {
+                        Layout.fillWidth: true
+                        ComboBox { id: styleBox
+                            visible: !vert.checked
+                            Layout.fillWidth: true; Layout.preferredHeight: 40
+                            model: ["Instrument","Twin ring","Dual motor","Tacho",
+                                    "Flank","Header","Cart","Custom"]
+                            onActivated: setv("cfg-style", currentIndex) }
+                        ComboBox { id: vstyleBox
+                            visible: vert.checked
+                            Layout.fillWidth: true; Layout.preferredHeight: 40
+                            model: ["Instrument","Tacho","Dual motor","Flank",
+                                    "Moto","Scoobi","Cart","Custom"]
+                            onActivated: setv("cfg-vstyle", currentIndex) }
+                        Button { text: "Preset"; Layout.preferredHeight: 40
+                            onClicked: {
+                                if (vert.checked)
+                                    send("(vpreset " + vstyleBox.currentIndex + ")")
+                                else
+                                    send("(preset " + styleBox.currentIndex + ")")
+                            } }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        CheckBox { id: vert; text: "Vertical"
+                            onClicked: if (!loading) send("(set-vertical " + (checked?"true":"false") + ")") }
+                        CheckBox { id: flip2; text: "Flip 180"
+                            onClicked: if (!loading) send("(set-flip " + (checked?"true":"false") + ")") }
+                    }
+
+                    Label {
+                        Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pointSize: 9
+                        text: "Main is the dominant reading. How many slots a layout " +
+                              "uses varies: Instrument 1-4 in the columns and 6-8 in " +
+                              "the footer, Twin ring 1 for the second ring and 2-4 " +
+                              "below, Dual motor 1-3 per column with the right side " +
+                              "using the second controller, Tacho 1 for the meter and " +
+                              "2-3 for the stats, Flank 1-2 for the meters and 3 below, " +
+                              "Header 1-4 across the top, Cart 1-4 down the pill. " +
+                              "A slot set to Off is skipped."
+                    }
+                }
+            }
+
+            GroupBox {
+                Layout.fillWidth: true
+                visible: pageSel.currentIndex === 0
+                title: "Main reading"
+                ColumnLayout {
+                    anchors.fill: parent
+                    RowLayout {
+                        Layout.fillWidth: true
+                        ComboBox { id: arcSrc
+                            Layout.fillWidth: true; Layout.preferredHeight: 40
+                            model: srcModel
+                            onActivated: setv("cfg-arc-src", currentIndex) }
+                        ComboBox { id: arcCol
+                            Layout.preferredWidth: 104; Layout.preferredHeight: 40
+                            model: colModel
+                            onActivated: setv("cfg-acc-arc", colVals[currentIndex]) }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: "Range" }
+                        SpinBox { id: arcMin; from: -200; to: 2000; editable: true
+                            onValueModified: setf("cfg-arc-min", value) }
+                        Label { text: "to" }
+                        SpinBox { id: arcMax; from: -200; to: 2000; editable: true
+                            onValueModified: setf("cfg-arc-max", value) }
+                    }
+                }
+            }
+
+            GroupBox {
+                Layout.fillWidth: true
+                visible: pageSel.currentIndex === 0
+                title: "Slot 1"
+                ColumnLayout {
+                    anchors.fill: parent
+                    RowLayout {
+                        Layout.fillWidth: true
+                        ComboBox { id: tlSrc
+                            Layout.fillWidth: true; Layout.preferredHeight: 40
+                            model: srcModel
+                            onActivated: setv("cfg-tl-src", currentIndex) }
+                        ComboBox { id: tlCol
+                            Layout.preferredWidth: 104; Layout.preferredHeight: 40
+                            model: colModel
+                            onActivated: setv("cfg-acc-tl", colVals[currentIndex]) }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: "Range" }
+                        SpinBox { id: tlMin; from: -200; to: 2000; editable: true
+                            onValueModified: setf("cfg-tl-min", value) }
+                        Label { text: "to" }
+                        SpinBox { id: tlMax; from: -200; to: 2000; editable: true
+                            onValueModified: setf("cfg-tl-max", value) }
+                    }
+                }
+            }
+
+            GroupBox {
+                Layout.fillWidth: true
+                visible: pageSel.currentIndex === 0
+                title: "Slot 2"
+                ColumnLayout {
+                    anchors.fill: parent
+                    RowLayout {
+                        Layout.fillWidth: true
+                        ComboBox { id: trSrc
+                            Layout.fillWidth: true; Layout.preferredHeight: 40
+                            model: srcModel
+                            onActivated: setv("cfg-tr-src", currentIndex) }
+                        ComboBox { id: trCol
+                            Layout.preferredWidth: 104; Layout.preferredHeight: 40
+                            model: colModel
+                            onActivated: setv("cfg-acc-tr", colVals[currentIndex]) }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: "Range" }
+                        SpinBox { id: trMin; from: -200; to: 2000; editable: true
+                            onValueModified: setf("cfg-tr-min", value) }
+                        Label { text: "to" }
+                        SpinBox { id: trMax; from: -200; to: 2000; editable: true
+                            onValueModified: setf("cfg-tr-max", value) }
+                    }
+                }
+            }
+
+            GroupBox {
+                Layout.fillWidth: true
+                visible: pageSel.currentIndex === 0
+                title: "Slot 3"
+                ColumnLayout {
+                    anchors.fill: parent
+                    RowLayout {
+                        Layout.fillWidth: true
+                        ComboBox { id: blSrc
+                            Layout.fillWidth: true; Layout.preferredHeight: 40
+                            model: srcModel
+                            onActivated: setv("cfg-bl-src", currentIndex) }
+                        ComboBox { id: blCol
+                            Layout.preferredWidth: 104; Layout.preferredHeight: 40
+                            model: colModel
+                            onActivated: setv("cfg-acc-bl", colVals[currentIndex]) }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: "Range" }
+                        SpinBox { id: blMin; from: -200; to: 2000; editable: true
+                            onValueModified: setf("cfg-bl-min", value) }
+                        Label { text: "to" }
+                        SpinBox { id: blMax; from: -200; to: 2000; editable: true
+                            onValueModified: setf("cfg-bl-max", value) }
+                    }
+                }
+            }
+
+            GroupBox {
+                Layout.fillWidth: true
+                visible: pageSel.currentIndex === 0
+                title: "Slot 4"
+                ColumnLayout {
+                    anchors.fill: parent
+                    RowLayout {
+                        Layout.fillWidth: true
+                        ComboBox { id: brSrc
+                            Layout.fillWidth: true; Layout.preferredHeight: 40
+                            model: srcModel
+                            onActivated: setv("cfg-br-src", currentIndex) }
+                        ComboBox { id: brCol
+                            Layout.preferredWidth: 104; Layout.preferredHeight: 40
+                            model: colModel
+                            onActivated: setv("cfg-acc-br", colVals[currentIndex]) }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: "Range" }
+                        SpinBox { id: brMin; from: -200; to: 2000; editable: true
+                            onValueModified: setf("cfg-br-min", value) }
+                        Label { text: "to" }
+                        SpinBox { id: brMax; from: -200; to: 2000; editable: true
+                            onValueModified: setf("cfg-br-max", value) }
+                    }
+                }
+            }
+
+            GroupBox {
+                Layout.fillWidth: true
+                visible: pageSel.currentIndex === 0
+                title: "Slot 6"
+                ColumnLayout {
+                    anchors.fill: parent
+                    RowLayout {
+                        Layout.fillWidth: true
+                        ComboBox { id: s6Src
+                            Layout.fillWidth: true; Layout.preferredHeight: 40
+                            model: srcModel
+                            onActivated: setv("cfg-s6-src", currentIndex) }
+                        ComboBox { id: s6Col
+                            Layout.preferredWidth: 104; Layout.preferredHeight: 40
+                            model: colModel
+                            onActivated: setv("cfg-acc-s6", colVals[currentIndex]) }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: "Range" }
+                        SpinBox { id: s6Min; from: -200; to: 2000; editable: true
+                            onValueModified: setf("cfg-s6-min", value) }
+                        Label { text: "to" }
+                        SpinBox { id: s6Max; from: -200; to: 2000; editable: true
+                            onValueModified: setf("cfg-s6-max", value) }
+                    }
+                }
+            }
+
+            GroupBox {
+                Layout.fillWidth: true
+                visible: pageSel.currentIndex === 0
+                title: "Slot 7"
+                ColumnLayout {
+                    anchors.fill: parent
+                    RowLayout {
+                        Layout.fillWidth: true
+                        ComboBox { id: s7Src
+                            Layout.fillWidth: true; Layout.preferredHeight: 40
+                            model: srcModel
+                            onActivated: setv("cfg-s7-src", currentIndex) }
+                        ComboBox { id: s7Col
+                            Layout.preferredWidth: 104; Layout.preferredHeight: 40
+                            model: colModel
+                            onActivated: setv("cfg-acc-s7", colVals[currentIndex]) }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: "Range" }
+                        SpinBox { id: s7Min; from: -200; to: 2000; editable: true
+                            onValueModified: setf("cfg-s7-min", value) }
+                        Label { text: "to" }
+                        SpinBox { id: s7Max; from: -200; to: 2000; editable: true
+                            onValueModified: setf("cfg-s7-max", value) }
+                    }
+                }
+            }
+
+            GroupBox {
+                Layout.fillWidth: true
+                visible: pageSel.currentIndex === 0
+                title: "Slot 8"
+                ColumnLayout {
+                    anchors.fill: parent
+                    RowLayout {
+                        Layout.fillWidth: true
+                        ComboBox { id: s8Src
+                            Layout.fillWidth: true; Layout.preferredHeight: 40
+                            model: srcModel
+                            onActivated: setv("cfg-s8-src", currentIndex) }
+                        ComboBox { id: s8Col
+                            Layout.preferredWidth: 104; Layout.preferredHeight: 40
+                            model: colModel
+                            onActivated: setv("cfg-acc-s8", colVals[currentIndex]) }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: "Range" }
+                        SpinBox { id: s8Min; from: -200; to: 2000; editable: true
+                            onValueModified: setf("cfg-s8-min", value) }
+                        Label { text: "to" }
+                        SpinBox { id: s8Max; from: -200; to: 2000; editable: true
+                            onValueModified: setf("cfg-s8-max", value) }
+                    }
+                }
+            }
+
+            GroupBox {
+                Layout.fillWidth: true
+                visible: pageSel.currentIndex === 0
+                title: "Bottom meter"
+                ColumnLayout {
+                    anchors.fill: parent
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: "Fill" }
+                        ComboBox { id: barFill
+                            Layout.fillWidth: true; Layout.preferredHeight: 40
+                            model: srcModel
+                            onActivated: setv("cfg-bar-fill", currentIndex) }
+                        ComboBox { id: barCol
+                            Layout.preferredWidth: 104; Layout.preferredHeight: 40
+                            model: colModel
+                            onActivated: setv("cfg-acc-batt", colVals[currentIndex]) }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: "Range" }
+                        SpinBox { id: barMin; from: -200; to: 2000; editable: true
+                            onValueModified: setf("cfg-bar-min", value) }
+                        Label { text: "to" }
+                        SpinBox { id: barMax; from: -200; to: 2000; value: 100; editable: true
+                            onValueModified: setf("cfg-bar-max", value) }
+                    }
+                }
+            }
+
+            // ---------------- RIDE PAGE ----------------
+            GroupBox {
+                Layout.fillWidth: true
+                visible: pageSel.currentIndex === 1
+                title: "Ride page layout"
+                ColumnLayout {
+                    anchors.fill: parent
+                    CheckBox { id: p2Show; text: "Show ride page"; checked: true
+                        onClicked: if (!loading) setv("cfg-show-page2", checked?"true":"false") }
+                    ComboBox { id: p2Style
+                        Layout.fillWidth: true; Layout.preferredHeight: 40
+                        model: ["Rows","Odometer","Diagnostic"]
+                        onActivated: setv("cfg-p2-style", currentIndex) }
+                    Label {
+                        Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pointSize: 9
+                        text: "Rows: ten ride and thermal values. Odometer: distance first.\nDiagnostic: dense grid with the fault code."
+                    }
+                }
+            }
+
+            // ---------------- CHARGING ----------------
+            GroupBox {
+                Layout.fillWidth: true
+                visible: pageSel.currentIndex === 2
+                title: "Charging"
+                ColumnLayout {
+                    anchors.fill: parent
+                    CheckBox { id: autoChg; text: "Switch to charging screen automatically"
+                        checked: true
+                        onClicked: if (!loading) setv("cfg-auto-charge", checked?"true":"false") }
+
+                }
+            }
+
+            // ---------------- HARDWARE ----------------
+            GroupBox {
+                Layout.fillWidth: true
+                visible: pageSel.currentIndex === 3
+                title: "Units"
+                RowLayout {
+                    anchors.fill: parent
+                    Label { text: "Speed" }
+                    ComboBox { id: uSpeed; Layout.fillWidth: true; model: ["MPH","km/h"]
+                        onActivated: setv("cfg-unit-speed", currentIndex) }
+                    Label { text: "Temp" }
+                    ComboBox { id: uTemp; Layout.fillWidth: true; model: ["F","C"]
+                        onActivated: setv("cfg-unit-temp", currentIndex) }
+                    Label { text: "Dist" }
+                    ComboBox { id: uDist; Layout.fillWidth: true; model: ["mi","km"]
+                        onActivated: setv("cfg-unit-dist", currentIndex) }
+                }
+            }
+
+            GroupBox {
+                Layout.fillWidth: true
+                visible: pageSel.currentIndex === 3
+                title: "Appearance"
+                ColumnLayout {
+                    anchors.fill: parent
+                    RowLayout {
+                        Layout.fillWidth: true
+                        CheckBox { id: splashOn; text: "Boot splash"; checked: true
+                            onClicked: if (!loading) setv("cfg-splash", checked?"true":"false") }
+                    }
+                    // The tops are what every layout still fits: every one was
+                    // drawn at +10% (24/50/136) and +20% over the defaults, and
+                    // at +20% MPH ran into the number on Tacho, Flank and
+                    // Header and the upright footer ran together; at the old
+                    // tops (40/80/200) nearly everything collided (2026-10-24).
+                    // Cart sets its own face and sizes - its panel and stack
+                    // are fitted to them and broke at +10% - so they are held
+                    // while it is the layout.
+                    Label { visible: cartLayout; color: "#9aa0aa"; wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                            text: "Cart uses its own typeface and sizes." }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        enabled: !cartLayout
+                        Label { text: "Label" }
+                        SpinBox { id: fsSm; from: 14; to: 24; value: 22
+                            onValueModified: { setv("cfg-fs-sm", value); send("(refonts)") } }
+                        Label { text: "Value" }
+                        SpinBox { id: fsLg; from: 24; to: 50; value: 46
+                            onValueModified: { setv("cfg-fs-lg", value); send("(refonts)") } }
+                        Label { text: "Main" }
+                        SpinBox { id: fsXl; from: 40; to: 260; value: 124
+                            onValueModified: { setv("cfg-fs-xl", value); send("(refonts)") } }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        enabled: !cartLayout
+                        Label { text: "Typeface" }
+                        ComboBox { id: fontFam; Layout.fillWidth: true
+                            model: ["Rajdhani","Montserrat"]
+                            onActivated: { setv("cfg-font", currentIndex); send("(refonts)") } }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: "Cart ground" }
+                        ComboBox { id: bgCol; Layout.fillWidth: true; model: themeModel
+                            currentIndex: 1
+                            onActivated: setv("cfg-bg-col", themeVals[currentIndex]) }
+                        Label { text: "Cart pill" }
+                        ComboBox { id: accCol; Layout.fillWidth: true; model: themeModel
+                            onActivated: setv("cfg-acc-col", themeVals[currentIndex]) }
+                    }
+                    CheckBox { id: themeAll; text: "Use these colours on every layout"
+                        onClicked: if (!loading) setv("cfg-theme-all", checked?"true":"false") }
+                    Label {
+                        Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pointSize: 9
+                        text: "Panel, text and status colours are derived from the ground " +
+                              "and pill, so a dark ground keeps light text and a light one " +
+                              "dark. The Cart and Custom layouts always use them; tick the " +
+                              "box to carry them across the other eleven as well."
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        TextField { id: themeCode
+                            Layout.fillWidth: true; Layout.preferredHeight: 40
+                            placeholderText: "CUP1-1E293B-000000-1-..."
+                            onAccepted: themeBtn.clicked()
+                        }
+                        Button { id: themeBtn; text: "Import"; Layout.preferredHeight: 40
+                            onClicked: {
+                                // only the characters a code is made of, so a
+                                // stray quote cannot reach the interpreter
+                                var c = themeCode.text.replace(/[^0-9A-Za-z-]/g, "")
+                                if (c.length < 4) { themeStatus.text = "paste a code first"; return }
+                                themeStatus.text = "importing"
+                                send("(cu-import \"" + c + "\")")
+                            } }
+                        Button { text: "Copy"; Layout.preferredHeight: 40
+                            onClicked: {
+                                themeStatus.text = "reading"
+                                // a free layout has a position for everything,
+                                // so it needs the longer of the two codes
+                                send(styleBox.currentIndex === 7 || vstyleBox.currentIndex === 7
+                                     ? "(layout-export)" : "(theme-export)")
+                            } }
+                    }
+                    Label { id: themeStatus; text: ""; color: "#6c6"; font.pointSize: 9 }
+                    Label {
+                        Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pointSize: 9
+                        text: "Build a theme at the Charged Up theme page, paste the " +
+                              "code here and press Import. Copy reads the theme this " +
+                              "display is already using back out, to share or to carry " +
+                              "to another one."
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: "Values" }
+                        ComboBox { id: cValue; Layout.fillWidth: true; model: colModel
+                            onActivated: setv("cfg-c-value", colVals[currentIndex]) }
+                        Label { text: "Units" }
+                        ComboBox { id: cUnit; Layout.fillWidth: true; model: colModel
+                            currentIndex: 5
+                            onActivated: setv("cfg-c-unit", colVals[currentIndex]) }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: "Main text" }
+                        ComboBox { id: lblMain; Layout.fillWidth: true
+                            model: ["None","Unit","Label","Both"]
+                            currentIndex: 1
+                            onActivated: setv("cfg-lbl-main", currentIndex) }
+                        Label { text: "Slot text" }
+                        ComboBox { id: lblSlot; Layout.fillWidth: true
+                            model: ["None","Unit","Label","Both"]
+                            currentIndex: 3
+                            onActivated: setv("cfg-lbl-slot", currentIndex) }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: "Icons" }
+                        ComboBox { id: iconBox; Layout.fillWidth: true
+                            model: ["Off","On"]; currentIndex: 1
+                            onActivated: setv("cfg-icons", currentIndex) }
+                        Label { text: "Size" }
+                        SpinBox { id: iconSize; from: 14; to: 48; value: 26
+                            onValueModified: { setv("cfg-icon-size", value); send("(refonts)") } }
+                    }
+                }
+            }
+
+            GroupBox {
+                Layout.fillWidth: true
+                visible: pageSel.currentIndex === 3
+                title: "Mode display and stock-controller fallback"
+                ColumnLayout {
+                    anchors.fill: parent
+                    RowLayout {
+                        Layout.fillWidth: true
+                        CheckBox { id: modeStrip; text: "Mode chip on screen"
+                            onClicked: if (!loading) setv("cfg-show-modestrip", checked?"true":"false") }
+                        Label { text: "Size" }
+                        SpinBox { id: modeSize; from: 20; to: 90; value: 48
+                            onValueModified: setv("cfg-mode-size", value) }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: "Corner"; Layout.preferredWidth: 56 }
+                        ComboBox { id: modePos
+                            Layout.fillWidth: true; Layout.preferredHeight: 40
+                            model: ["Auto","Top left","Top centre","Top right",
+                                    "Middle left","Centre","Middle right",
+                                    "Bottom left","Bottom centre","Bottom right"]
+                            currentIndex: 2
+                            onActivated: setv("cfg-mode-pos", currentIndex - 1) }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: "Nudge X"; Layout.preferredWidth: 56 }
+                        SpinBox { id: modeDx; from: -240; to: 240; stepSize: 10; editable: true; value: 0
+                            onValueModified: setv("cfg-mode-dx", value) }
+                        Label { text: "Y" }
+                        SpinBox { id: modeDy; from: -240; to: 240; stepSize: 10; editable: true; value: 0
+                            onValueModified: setv("cfg-mode-dy", value) }
+                        Button { text: "Auto"
+                            onClicked: { modePos.currentIndex = 0
+                                         modeDx.value = 0; modeDy.value = 0
+                                         setv("cfg-mode-pos", -1)
+                                         setv("cfg-mode-dx", 0); setv("cfg-mode-dy", 0) } }
+
+                    }
+                    Label {
+                        Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pointSize: 9
+                        text: "Package power: use POWER MODES on the screen, or the controller package editor. The amp fields below apply only without a package.\nTap the chip to step modes. Pick a corner, then nudge it into a gap.\nTacho draws its own chip, so the overlay is hidden there."
+                    }
+                    CheckBox { id: cruiseCancel; text: "Any button cancels cruise"
+                        visible: !simpleMode.checked
+                        checked: true
+                        onClicked: if (!loading) setv("cfg-cruise-cancel", checked?"true":"false") }
+                    GridLayout {
+                        Layout.fillWidth: true
+                        columns: 6
+                        Label { text: "" } Label { text: "Motor A" }
+                        Label { text: "Batt A" } Label { text: "Speed" }
+                        Label { text: "Brake A" } Label { text: "" }
+                        Label { text: "ECO" }
+                        SpinBox { id: m1mot; from: 1; to: 400; value: 40
+                            onValueModified: setv("cfg-m1-mot", value) }
+                        SpinBox { id: m1bat; from: 1; to: 400; value: 25
+                            onValueModified: setv("cfg-m1-bat", value) }
+                        SpinBox { id: m1spd; from: 1; to: 200; value: 25
+                            onValueModified: setv("cfg-m1-spd", value) }
+                        SpinBox { id: m1brk; from: 1; to: 400; value: 30
+                            onValueModified: setv("cfg-m1-brk", value) }
+                        Button { text: "Apply"; onClicked: send("(send-mode 1)") }
+                        Label { text: "RIDE" }
+                        SpinBox { id: m2mot; from: 1; to: 400; value: 80
+                            onValueModified: setv("cfg-m2-mot", value) }
+                        SpinBox { id: m2bat; from: 1; to: 400; value: 50
+                            onValueModified: setv("cfg-m2-bat", value) }
+                        SpinBox { id: m2spd; from: 1; to: 200; value: 45
+                            onValueModified: setv("cfg-m2-spd", value) }
+                        SpinBox { id: m2brk; from: 1; to: 400; value: 60
+                            onValueModified: setv("cfg-m2-brk", value) }
+                        Button { text: "Apply"; onClicked: send("(send-mode 2)") }
+                        Label { text: "WILD" }
+                        SpinBox { id: m3mot; from: 1; to: 400; value: 150
+                            onValueModified: setv("cfg-m3-mot", value) }
+                        SpinBox { id: m3bat; from: 1; to: 400; value: 90
+                            onValueModified: setv("cfg-m3-bat", value) }
+                        SpinBox { id: m3spd; from: 1; to: 200; value: 99
+                            onValueModified: setv("cfg-m3-spd", value) }
+                        SpinBox { id: m3brk; from: 1; to: 400; value: 90
+                            onValueModified: setv("cfg-m3-brk", value) }
+                        Button { text: "Apply"; onClicked: send("(send-mode 3)") }
+                        Label { text: "ROAD" }
+                        SpinBox { id: dmot; from: 1; to: 400; value: 30
+                            onValueModified: setv("cfg-d-mot", value) }
+                        SpinBox { id: dbat; from: 1; to: 400; value: 12
+                            onValueModified: setv("cfg-d-bat", value) }
+                        SpinBox { id: dspd; from: 1; to: 200; value: 25
+                            onValueModified: setv("cfg-d-spd", value) }
+                        SpinBox { id: dbrk; from: 1; to: 400; value: 30
+                            onValueModified: setv("cfg-d-brk", value) }
+                        Button { text: "Apply"; enabled: dEn.checked
+                            onClicked: send("(send-mode 4)") }
+                    }
+                    CheckBox { id: dEn; text: "Road mode on both buttons"
+                        visible: !simpleMode.checked
+                        onClicked: if (!loading) setv("cfg-d-en", checked?"true":"false") }
+                    Label {
+                        Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pointSize: 9
+                        visible: dEn.checked
+                        text: "Hold both buttons for a second or two and let go: the chip " +
+                              "shows D and the ROAD limits apply. The same gesture takes it " +
+                              "back out, and nothing else will \u2014 up, down, cycle and " +
+                              "reverse all do nothing while it is on. Holding past five " +
+                              "seconds is still the speed limiter, not this."
+                    }
+                }
+            }
+
+            GroupBox {
+                Layout.fillWidth: true
+                visible: pageSel.currentIndex === 3
+                title: "System"
+                ColumnLayout {
+                    anchors.fill: parent
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: "Refresh" }
+                        SpinBox { id: hz; from: 1; to: 25; value: 25
+                            onValueModified: setf("cfg-refresh", value) }
+                        Label { text: "ESC id" }
+                        SpinBox { id: escId; from: 0; to: 254; value: 0
+                            onValueModified: setv("cfg-esc-id", value) }
+                        Label { text: "Chan" }
+                        SpinBox { id: chanBox; from: 1; to: 13; value: 1
+                            onValueModified: { setv("cfg-chan", value)
+                                               send("(wifi-set-chan " + value + ")") } }
+                        CheckBox { id: esc2En; text: "2nd ESC"
+                            onClicked: if (!loading) setv("cfg-esc2-en", checked?"true":"false") }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: "Charged Up Link" }
+                        Button { text: "Forget link"
+                            onClicked: { send("(link-forget)")
+                                         linkStatus.text = "forgotten - pairs with the next link it hears close by" } }
+                        Button { text: "Status"; onClicked: send("(link-info)") }
+                        Label { id: linkStatus; text: ""; color: "#6c6"
+                            Layout.fillWidth: true; font.pointSize: 9 }
+                    }
+                    Label {
+                        Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pointSize: 9
+                        text: "The display pairs with one link - the first it hears close " +
+                              "by - and ignores every other, so riders together never see " +
+                              "or change each other's carts. Forget it after swapping the " +
+                              "link, with the new one powered and the old one gone."
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        CheckBox { id: simpleMode; text: "Cart mode"
+                            onCheckedChanged: refreshActionLabels(checked)
+                            onClicked: if (!loading) { touched = true; send("(set-cart-mode " + (checked ? "true" : "false") + ")") } }
+                        CheckBox { id: revEn; text: "Allow reverse"; checked: true
+                            enabled: !simpleMode.checked
+                            onClicked: if (!loading) setv("cfg-rev-en", checked?"true":"false") }
+                    }
+                    Label {
+                        Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pointSize: 9
+                        visible: simpleMode.checked
+                        text: "Cart mode starts with the Cart theme. You can choose any layout or theme " +
+                              "afterward, and your choice stays saved. CU Wheelie, IMU setup, " +
+                              "reverse, walk assist, cruise and the bike indicator strip are hidden " +
+                              "or inactive. Button assignments keep their saved bike settings; " +
+                              "the choices below show what they do in Cart mode."
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        CheckBox { id: btnEn; text: "Hardware buttons"; checked: true
+                            onClicked: send("(set-btn-en " + (checked?"true":"false") + ")") }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: btnEn.checked
+                        Label { text: "Top" }
+                        SpinBox { id: btnUp; from: 0; to: 48; value: 15
+                            onValueModified: setv("cfg-btn-up", value) }
+                        Label { text: "Bottom" }
+                        SpinBox { id: btnDn; from: 0; to: 48; value: 16
+                            onValueModified: setv("cfg-btn-dn", value) }
+                        Label { text: "Common" }
+                        SpinBox { id: btnGnd; from: -1; to: 48; value: 7
+                            onValueModified: setv("cfg-btn-gnd", value) }
+                        Label { text: "3rd" }
+                        SpinBox { id: btn3; from: -1; to: 48; value: 6
+                            onValueModified: setv("cfg-btn-3", value) }
+                        Button { text: "Apply"; onClicked: send("(btn-init)") }
+                        Button { text: "Test"; onClicked: send("(btn-mon)") }
+                    }
+                    GridLayout {
+                        Layout.fillWidth: true
+                        visible: btnEn.checked
+                        columns: 3
+                        Label { text: "" } Label { text: "Short press" }
+                        Label { text: "Long press" }
+                        Label { text: "Top" }
+                        ComboBox { id: aUpS; Layout.fillWidth: true; model: actModel
+                            currentIndex: 8
+                            onActivated: setv("cfg-btn-up-s", currentIndex) }
+                        ComboBox { id: aUpL; Layout.fillWidth: true; model: actModel
+                            currentIndex: 0
+                            onActivated: setv("cfg-btn-up-l", currentIndex) }
+                        Label { text: "Bottom" }
+                        ComboBox { id: aDnS; Layout.fillWidth: true; model: actModel
+                            currentIndex: 9
+                            onActivated: setv("cfg-btn-dn-s", currentIndex) }
+                        ComboBox { id: aDnL; Layout.fillWidth: true; model: actModel
+                            currentIndex: 0
+                            onActivated: setv("cfg-btn-dn-l", currentIndex) }
+                        Label { text: "Centre" }
+                        ComboBox { id: a3S; Layout.fillWidth: true; model: actModel
+                            currentIndex: 3
+                            onActivated: setv("cfg-btn-3-s", currentIndex) }
+                        ComboBox { id: a3L; Layout.fillWidth: true; model: actModel
+                            currentIndex: 10
+                            onActivated: setv("cfg-btn-3-l", currentIndex) }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: !simpleMode.checked
+                        Label { text: "Wheelie page" }
+                        ComboBox { id: whlPage; Layout.fillWidth: true
+                            model: ["Off","When CU Wheelie is found","Always"]
+                            currentIndex: 1
+                            onActivated: setv("cfg-whl-page", currentIndex) }
+                    }
+                    Label {
+                        Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pointSize: 9
+                        text: "A CU IO Link's two switches are set on the link's own page " +
+                              "and work with or without this display."
+                    }
+                    Label {
+                        Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pointSize: 9
+                        text: "Short and long press are set per button above. A button " +
+                              "with no long action fires the moment it is pressed. " +
+                              "Common is driven low as a local ground; set it to -1 to " +
+                              "use a real ground."
+                    }
+                }
+            }
+
+            GroupBox {
+                Layout.fillWidth: true
+                visible: pageSel.currentIndex === 3
+                title: "Backlight"
+                ColumnLayout {
+                    anchors.fill: parent
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: "Day" }
+                        SpinBox { id: blDay; from: 5; to: 100; value: 100
+                            onValueModified: { send("(def cfg-bl-day " + (value/100).toFixed(2) + ")")
+                                               send("(bl-apply)") } }
+                        Label { text: "Night" }
+                        SpinBox { id: blNight; from: 5; to: 100; value: 25
+                            onValueModified: { send("(def cfg-bl-night " + (value/100).toFixed(2) + ")")
+                                               send("(bl-apply)") } }
+                        Button { text: "Toggle"; onClicked: send("(bl-toggle)") }
+                        Label { text: "Step %" }
+                        SpinBox { id: blStep; from: 2; to: 25; value: 10
+                            onValueModified: setv("cfg-bl-step", value) }
+                    }
+                    Label {
+                        Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pointSize: 9
+                        text: "Assign Night mode to a button to switch between the two " +
+                              "levels while riding."
+                    }
+                }
+            }
+
+            GroupBox {
+                Layout.fillWidth: true
+                visible: pageSel.currentIndex === 3
+                title: "Speed limit"
+                ColumnLayout {
+                    anchors.fill: parent
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: "Limit to" }
+                        SpinBox { id: kidMph; from: 5; to: 60; value: 26
+                            onValueModified: send("(def cfg-kid-mph " + value + ".0)") }
+                        Label { text: "mph and" }
+                        SpinBox { id: kidW; from: 200; to: 20000; stepSize: 100
+                            value: 2000
+                            onValueModified: send("(def cfg-kid-w " + value + ".0)") }
+                        Label { text: "W" }
+                    }
+                    Label {
+                        Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pointSize: 9
+                        text: "Hold both signal buttons together for five seconds to " +
+                              "apply the limit. To lift it, press the centre button five " +
+                              "times within four seconds and hold the last press for " +
+                              "five seconds. Nothing is shown on screen either way, and " +
+                              "the limit is stored on the link so it survives a power " +
+                              "cycle and applies with no display connected. It only ever " +
+                              "lowers a limit, never raises one."
+                    }
+                }
+            }
+
+            GroupBox {
+                Layout.fillWidth: true
+                visible: pageSel.currentIndex === 3
+                title: "Connect straight to a VESC over Bluetooth"
+                ColumnLayout {
+                    anchors.fill: parent
+                    CheckBox { id: vbEn; text: "Use a direct Bluetooth connection"
+                        // A cart has no link board - this connection is how it
+                        // talks to its controller at all - so it is shown, and
+                        // shown ticked, but not something to switch off by
+                        // accident while standing over the machine.
+                        enabled: !simpleMode.checked
+                        onClicked: if (!loading) {
+                            if (simpleMode.checked) { checked = true; return }
+                            setv("cfg-vb-en", checked?"true":"false")
+                            if (checked) send("(vb-start)")
+                            else { send("(ble-disconnect)") }
+                        } }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: vbEn.checked
+                        Button { text: "Scan"; Layout.preferredHeight: 40
+                            onClicked: { vbStatus.text = "scanning..."
+                                         send("(vb-list)"); vbTimer.start() } }
+                        ComboBox { id: vbList
+                            Layout.fillWidth: true; Layout.preferredHeight: 40
+                            model: [] }
+                        Button { text: "Connect"; Layout.preferredHeight: 40
+                            enabled: vbList.count > 0
+                            onClicked: {
+                                var m = vbList.currentText.split(" ")[0]
+                                vbStatus.text = "connecting to " + m
+                                send("(vb-use \"" + m + "\")")
+                            } }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: vbEn.checked
+                        Button { text: "Forget"
+                            onClicked: { send("(eeprom-store-i 110 0)")
+                                         vbStatus.text = "saved controller cleared" } }
+                        Button { text: "Status"; onClicked: send("(vb-info)") }
+                        Label { id: vbStatus; text: ""; color: "#6c6"
+                            Layout.fillWidth: true; font.pointSize: 9 }
+                    }
+                    Label {
+                        Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pointSize: 9
+                        visible: vbEn.checked
+                        text: "For a controller that already has Bluetooth: the display " +
+                              "reads it directly and no Charged Up Link is needed. The " +
+                              "chosen controller is remembered and reconnects at power " +
+                              "up. Telemetry only - lights, relay outputs and a BLE BMS " +
+                              "still want the link. Needs the display firmware with the " +
+                              "BLE central patch."
+                    }
+                    Timer {
+                        id: vbTimer
+                        interval: 6500
+                        repeat: false
+                    }
+                }
+            }
+
+            GroupBox {
+                Layout.fillWidth: true
+                visible: pageSel.currentIndex === 3
+                title: "Status strip"
+                ColumnLayout {
+                    anchors.fill: parent
+                    RowLayout {
+                        Layout.fillWidth: true
+                        CheckBox { id: statusOn; text: "Show indicators"
+                            onClicked: if (!loading) setv("cfg-show-status", checked?"true":"false") }
+                        CheckBox { id: statusTest; text: "Test all on"
+                            onClicked: if (!loading) setv("cfg-status-test", checked?"true":"false") }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: "X" }
+                        SpinBox { id: stX; from: -1; to: 460; value: -1
+                            stepSize: 10; editable: true
+                            onValueModified: setv("cfg-status-x", value) }
+                        Label { text: "Y" }
+                        SpinBox { id: stY; from: -1; to: 450; value: -1
+                            stepSize: 10; editable: true
+                            onValueModified: setv("cfg-status-y", value) }
+                        Button { text: "Auto"
+                            onClicked: { stX.value = -1; stY.value = -1
+                                         setv("cfg-status-x", -1)
+                                         setv("cfg-status-y", -1) } }
+                    }
+                    Label {
+                        Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pointSize: 9
+                        text: "Turn signals, high beam, brake and the fault code. Each " +
+                              "layout has a place for the strip and shifts its own " +
+                              "content to make room. Leave X and Y at -1 to use that, " +
+                              "or set them to position it yourself."
+                    }
+
+                }
+            }
+
+            Item { Layout.preferredHeight: 24 }
+        }
+    }
+}

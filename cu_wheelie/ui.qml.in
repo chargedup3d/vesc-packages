@@ -1,0 +1,978 @@
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import QtQuick.Layouts 1.3
+
+import Vedder.vesc.commands 1.0
+import Vedder.vesc.utility 1.0
+
+Item {
+    id: root
+    anchors.fill: parent
+    anchors.margins: 8
+
+    property Commands mCommands: VescIf.commands()
+    property bool confLoaded: false
+
+    // ---- Controller telemetry ("rt", 25 Hz) ----
+    property real rtPitch: 0.0
+    property real rtRate: 0.0
+    property real rtRoll: 0.0
+    property bool armed: false
+    property real rtOut: 0.0
+    property real rtRider: 0.0
+    property int actSrc: 0          // 0 none, 1 internal, 2 express
+    property real exAge: -1         // ms, -1 = never seen
+    property int exDrops: 0         // dropped Express frames per second
+    property bool fault: false
+    property bool crash: false
+    property int lostPhase: 0       // 1 letting down, 2 motor held off, 3 rider has throttle
+    property bool logOn: false
+    // settings no longer shown on the page; written back exactly as loaded
+    property bool invertSign: false
+    property int exOff: 0
+    property bool logEn: true
+    property int logId: -1
+    property real logHz: 50
+    property real exRawPitch: 0.0    // the Express's reading, even when not in use
+    property real exRawRoll: 0.0
+    property int exRawFlags: 0
+    property bool brakeOn: false
+    property real decel: 0.0        // m/s^2, positive = slowing
+    // Express frames arriving but not usable (e.g. not levelled)
+    readonly property bool exIdle: ctrlLive && actSrc !== 2 && exAge >= 0 && exAge < 200
+    property double lastRt: 0
+    property bool ctrlLive: false
+    readonly property var srcNames: ["NONE", "INTERNAL", "EXPRESS"]
+    property string statusText: "Connecting to controller script..."
+
+    // IMU status is received from the controller. Setup belongs to Express.
+    readonly property bool imuDataLive: ctrlLive && exAge >= 0 && exAge < 200
+    readonly property bool imuStatusLive: imuDataLive
+    readonly property real imuPitch: exRawPitch
+    readonly property real imuRoll: exRawRoll
+    readonly property int imuFlags: exRawFlags
+
+    function updateFreshness() {
+        ctrlLive = lastRt > 0 && Date.now() - lastRt < 600
+    }
+
+    // ---- Look ----
+    readonly property color textColor: Utility.getAppHexColor("lightText")
+    readonly property color dimText: "#9a9a9a"
+    readonly property color cardColor: "#262626"
+    readonly property color gridColor: "#444444"
+    readonly property color okColor: "#66BB6A"
+    readonly property color badColor: "#FF5252"
+    readonly property color warnColor: "#FFC107"
+    readonly property color pitchColor: "#FF9F1C"
+    readonly property color rollColor: "#4FC3F7"
+
+    // ==================================================================
+    //  Bike drawings (from reference/sketches/*.svg, drawn on a Canvas)
+    // ==================================================================
+    function strokeSvg(c, d) {
+        var tok = d.match(/[MLZ]|-?[0-9]*\.?[0-9]+/g)
+        var i = 0
+        c.beginPath()
+        while (i < tok.length) {
+            var t = tok[i]
+            if (t === "M") { c.moveTo(Number(tok[i + 1]), Number(tok[i + 2])); i += 3 }
+            else if (t === "L") { c.lineTo(Number(tok[i + 1]), Number(tok[i + 2])); i += 3 }
+            else if (t === "Z") { c.closePath(); i++ }
+            else i++
+        }
+        c.stroke()
+    }
+
+    function strokeRRect(c, r) {
+        c.beginPath()
+        c.roundedRect(r[0], r[1], r[2], r[3], r[4], r[4])
+        c.stroke()
+    }
+
+    // Side profile, facing left. Pivots on the rear tyre contact patch.
+    readonly property var sidePaths: [
+        "M-50.99 -39.57 L-7.5 -25.5 L-7.5 4 L-40 4 L-52.15 -36.7 Z",
+        "M-39.86 -64.22 L-49.86 -42.35 L-54.96 -29.75 L-56.46 -26.04 L-71.21 3.81",
+        "M-7.5 -25.5 L20.91 -28.83",
+        "M-7.5 -15 L17.11 -28.83",
+        "M-7.5 4 L0 0 L40.79 0.17"]
+    readonly property var sideRRects: [[-17.5, -36.32, 41, 6.6, 3.3]]
+    readonly property var sideWheels: [[-71.21, 3.81, 20.7], [40.79, 0.17, 24.34]]
+
+    // Rear view. Pivots on the tyre contact patch.
+    readonly property var rearPaths: [
+        "M-27.5 -48.32 L27.5 -48.32",
+        "M0 -48.32 L0 -37.32",
+        "M-20.3 4 L-11 4",
+        "M11 4 L20.3 4"]
+    readonly property var rearRRects: [[-8.5, -36.32, 17, 5.2, 2.6], [-6.5, -24.17, 13, 48.68, 6.2]]
+
+    component SideView: Canvas {
+        implicitHeight: 160
+        property real angle: 0          // deg, nose up +
+        property real startDeg: -1      // fade start zone (deg), -1 = none
+        property real endDeg: -1        // ceiling zone (deg), -1 = none
+        property real cutDeg: -1        // crash cutoff (deg), -1 = none
+        property color accent: pitchColor
+        property real shown: Math.max(-35, Math.min(85, angle))
+        Behavior on shown { NumberAnimation { duration: 60 } }
+        onShownChanged: requestPaint()
+        onStartDegChanged: requestPaint()
+        onEndDegChanged: requestPaint()
+        onCutDegChanged: requestPaint()
+        onAccentChanged: requestPaint()
+        onWidthChanged: requestPaint()
+        onHeightChanged: requestPaint()
+
+        onPaint: {
+            var c = getContext("2d")
+            c.reset()
+            var m = 8
+            var s = Math.min((width - 2 * m) / 180, (height - 2 * m) / 150)
+            var px = width - m - 32 * s, py = height - m - 6 * s
+            var R = 150 * s
+
+            // fade / ceiling zones, fanned out from the pivot toward the front
+            if (endDeg > 0) {
+                var a0 = Math.PI + startDeg * Math.PI / 180
+                var a1 = Math.PI + endDeg * Math.PI / 180
+                c.globalAlpha = 0.14
+                c.fillStyle = warnColor
+                c.beginPath(); c.moveTo(px, py); c.arc(px, py, R, a0, a1, false); c.closePath(); c.fill()
+                var a2 = cutDeg > endDeg ? Math.PI + cutDeg * Math.PI / 180 : Math.PI * 1.5
+                c.fillStyle = badColor
+                c.beginPath(); c.moveTo(px, py); c.arc(px, py, R, a1, a2, false); c.closePath(); c.fill()
+                if (cutDeg > endDeg) {
+                    c.globalAlpha = 0.3
+                    c.fillStyle = "#8E24AA"
+                    c.beginPath(); c.moveTo(px, py); c.arc(px, py, R, a2, Math.PI * 1.5, false); c.closePath(); c.fill()
+                }
+                c.globalAlpha = 1
+                c.lineWidth = 1
+                c.font = "11px sans-serif"
+                var rays = [[startDeg, warnColor], [endDeg, badColor]]
+                if (cutDeg > endDeg) rays.push([cutDeg, "#CE93D8"])
+                for (var k = 0; k < rays.length; k++) {
+                    var a = Math.PI + rays[k][0] * Math.PI / 180
+                    c.strokeStyle = rays[k][1]
+                    c.beginPath(); c.moveTo(px, py); c.lineTo(px + R * Math.cos(a), py + R * Math.sin(a)); c.stroke()
+                    c.fillStyle = rays[k][1]
+                    c.fillText(rays[k][0].toFixed(0) + "°", px + (R + 4) * Math.cos(a) - 10, py + (R + 4) * Math.sin(a))
+                }
+            }
+
+            // ground
+            c.strokeStyle = gridColor
+            c.lineWidth = 1
+            c.beginPath(); c.moveTo(m, py); c.lineTo(width - m, py); c.stroke()
+
+            // bike
+            c.save()
+            c.translate(px, py)
+            c.rotate(shown * Math.PI / 180)
+            c.scale(s, s)
+            c.translate(-40.79, -24.51)
+            c.lineCap = "round"
+            c.lineJoin = "round"
+            c.lineWidth = 3
+            c.strokeStyle = textColor
+            for (var w = 0; w < sideWheels.length; w++) {
+                c.beginPath(); c.arc(sideWheels[w][0], sideWheels[w][1], sideWheels[w][2], 0, 2 * Math.PI); c.stroke()
+            }
+            c.strokeStyle = accent
+            for (var i = 0; i < sidePaths.length; i++) strokeSvg(c, sidePaths[i])
+            for (var j = 0; j < sideRRects.length; j++) strokeRRect(c, sideRRects[j])
+            c.restore()
+        }
+    }
+
+    component RearView: Canvas {
+        implicitHeight: 100
+        property real angle: 0          // deg, lean right +
+        property color accent: rollColor
+        property real shown: Math.max(-70, Math.min(70, angle))
+        Behavior on shown { NumberAnimation { duration: 60 } }
+        onShownChanged: requestPaint()
+        onAccentChanged: requestPaint()
+        onWidthChanged: requestPaint()
+        onHeightChanged: requestPaint()
+
+        onPaint: {
+            var c = getContext("2d")
+            c.reset()
+            var m = 8
+            var s = Math.min((width - 2 * m) / 120, (height - 2 * m) / 84)
+            var px = width / 2, py = height - m - 2 * s
+            c.strokeStyle = gridColor
+            c.lineWidth = 1
+            c.beginPath(); c.moveTo(m, py); c.lineTo(width - m, py); c.stroke()
+            c.beginPath(); c.moveTo(px, py); c.lineTo(px, py - 80 * s); c.stroke()
+
+            c.save()
+            c.translate(px, py)
+            c.rotate(shown * Math.PI / 180)
+            c.scale(s, s)
+            c.translate(0, -24.51)
+            c.lineCap = "round"
+            c.lineJoin = "round"
+            c.lineWidth = 3
+            c.strokeStyle = textColor
+            strokeRRect(c, rearRRects[1])           // tyre
+            c.strokeStyle = accent
+            strokeRRect(c, rearRRects[0])
+            for (var i = 0; i < rearPaths.length; i++) strokeSvg(c, rearPaths[i])
+            c.restore()
+        }
+    }
+
+    // ---- Small building blocks ----
+    component Card: Rectangle {
+        radius: 8
+        color: cardColor
+    }
+
+    component Pill: Rectangle {
+        property string label: ""
+        property color tone: okColor
+        radius: 4
+        color: tone
+        width: pillText.implicitWidth + 14
+        height: pillText.implicitHeight + 6
+        implicitWidth: width
+        implicitHeight: height
+        Text {
+            id: pillText
+            anchors.centerIn: parent
+            text: parent.label
+            color: "#ffffff"
+            font.pixelSize: 11
+            font.bold: true
+        }
+    }
+
+    component Caption: Text {
+        color: dimText
+        font.pixelSize: 11
+        font.bold: true
+        font.letterSpacing: 1
+    }
+
+    component ParamSlider: ColumnLayout {
+        property string name: ""
+        property string units: ""
+        property string hint: ""
+        property int decimals: 2
+        property alias value: slider.value
+        property alias from: slider.from
+        property alias to: slider.to
+        property alias stepSize: slider.stepSize
+        Layout.fillWidth: true
+        spacing: 0
+        RowLayout {
+            Layout.fillWidth: true
+            Text {
+                text: name
+                color: textColor
+                font.pixelSize: 14
+                Layout.fillWidth: true
+            }
+            Text {
+                text: slider.value.toFixed(decimals) + units
+                color: textColor
+                font.pixelSize: 14
+                font.bold: true
+            }
+        }
+        Text {
+            visible: hint.length > 0
+            text: hint
+            color: dimText
+            font.pixelSize: 11
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+        }
+        Slider {
+            id: slider
+            Layout.fillWidth: true
+        }
+    }
+
+    // A horizontal bar; centre-zero when from < 0
+    component Bar: Canvas {
+        property string name: ""
+        property real value: 0
+        property real from: 0
+        property real to: 1
+        property color tone: okColor
+        Layout.fillWidth: true
+        implicitHeight: 34
+        onNameChanged: requestPaint()
+        onValueChanged: requestPaint()
+        onFromChanged: requestPaint()
+        onToChanged: requestPaint()
+        onToneChanged: requestPaint()
+        onWidthChanged: requestPaint()
+        onHeightChanged: requestPaint()
+        onPaint: {
+            var c = getContext("2d")
+            c.reset()
+            c.font = "11px sans-serif"
+            c.fillStyle = dimText
+            c.fillText(name, 0, 11)
+            c.fillStyle = textColor
+            c.fillText((value * 100).toFixed(0) + "%", Math.max(0, width - 32), 11)
+            var span = Math.max(0.0001, to - from)
+            var zero = width * (-from) / span
+            var end = width * (Math.max(from, Math.min(to, value)) - from) / span
+            c.fillStyle = "#3a3a3a"
+            c.fillRect(0, height - 10, width, 10)
+            c.fillStyle = value < 0 ? badColor : tone
+            c.fillRect(Math.min(zero, end), height - 10, Math.abs(end - zero), 10)
+            if (from < 0) {
+                c.fillStyle = textColor
+                c.fillRect(zero - 1, height - 10, 2, 10)
+            }
+        }
+    }
+
+    // ==================================================================
+    //  Comms
+    // ==================================================================
+    function sendCmd(c) {
+        var buffer = new ArrayBuffer(1)
+        new DataView(buffer).setUint8(0, c)
+        mCommands.sendCustomAppData(buffer)
+    }
+
+    function writeConfig() {
+        var buffer = new ArrayBuffer(66)
+        var dv = new DataView(buffer)
+        var i = 0
+        dv.setUint8(i, 2); i += 1
+        dv.setFloat32(i, pStart.value); i += 4
+        dv.setFloat32(i, pEnd.value); i += 4
+        dv.setFloat32(i, pDamp.value); i += 4
+        dv.setFloat32(i, pPull.value); i += 4
+        dv.setFloat32(i, pLpf.value); i += 4
+        dv.setFloat32(i, invertSign ? -1.0 : 1.0); i += 4
+        dv.setUint8(i, cbSource.currentIndex); i += 1
+        dv.setUint8(i, exOff); i += 1
+        dv.setFloat32(i, pStale.value); i += 4
+        dv.setFloat32(i, pCutPitch.value); i += 4
+        dv.setFloat32(i, pCutRoll.value); i += 4
+        dv.setFloat32(i, pCutMs.value); i += 4
+        dv.setUint8(i, cbCutMode.currentIndex); i += 1
+        dv.setFloat32(i, pLetdown.value); i += 4
+        dv.setUint8(i, logEn ? 1 : 0); i += 1
+        dv.setUint8(i, logId < 0 ? 255 : logId); i += 1
+        dv.setFloat32(i, logHz); i += 4
+        dv.setFloat32(i, pBrkDecel.value); i += 4
+        dv.setFloat32(i, pBrkOff.value); i += 4
+        dv.setFloat32(i, pBrkRegen.value); i += 4
+        mCommands.sendCustomAppData(buffer)
+        statusText = "Written and saved to the controller"
+    }
+
+    Component.onCompleted: sendCmd(1)
+
+    // CAN setup polling clears the controller's asynchronous reply destination.
+    // Renew it while this view is open, so live feedback does not wait up to a
+    // second for the next keepalive. Command 0 only requests telemetry.
+    Timer {
+        interval: 100
+        running: true
+        repeat: true
+        onTriggered: sendCmd(0)
+    }
+
+    Timer {
+        interval: 1000
+        running: !confLoaded
+        repeat: true
+        onTriggered: sendCmd(1)
+    }
+
+    Timer {
+        interval: 250
+        repeat: true
+        running: true
+        onTriggered: updateFreshness()
+    }
+
+    Connections {
+        target: mCommands
+
+        function onCustomAppDataReceived(data) {
+            var str = data.toString()
+            var t = str.split(" ")
+            if (t[0] === "rt") {
+                rtPitch = Number(t[1])
+                rtRate = Number(t[2])
+                armed = Number(t[3]) === 1
+                rtOut = Number(t[4])
+                rtRider = Number(t[5])
+                if (t.length > 9) {
+                    actSrc = Number(t[6])
+                    exAge = Number(t[7])
+                    exDrops = Number(t[8])
+                    fault = Number(t[9]) === 1
+                }
+                if (t.length > 10) rtRoll = Number(t[10])
+                if (t.length > 12) {
+                    crash = Number(t[11]) === 1
+                    lostPhase = Number(t[12])
+                }
+                if (t.length > 13) logOn = Number(t[13]) === 1
+                if (t.length > 18) {
+                    brakeOn = Number(t[17]) === 1
+                    decel = Number(t[18])
+                }
+                if (t.length > 16) {
+                    exRawPitch = Number(t[14])
+                    exRawRoll = Number(t[15])
+                    exRawFlags = Number(t[16])
+                }
+                lastRt = Date.now()
+            } else if (t[0] === "conf") {
+                pStart.value = Number(t[1])
+                pEnd.value = Number(t[2])
+                pDamp.value = Number(t[3])
+                pPull.value = Number(t[4])
+                pLpf.value = Number(t[5])
+                invertSign = Number(t[6]) < 0
+                armed = Number(t[7]) === 1
+                if (t.length > 10) {
+                    cbSource.currentIndex = Number(t[8])
+                    exOff = Number(t[9])
+                    pStale.value = Number(t[10])
+                }
+                if (t.length > 15) {
+                    pCutPitch.value = Number(t[11])
+                    pCutRoll.value = Number(t[12])
+                    pCutMs.value = Number(t[13])
+                    cbCutMode.currentIndex = Number(t[14])
+                    pLetdown.value = Number(t[15])
+                }
+                if (t.length > 18) {
+                    logEn = Number(t[16]) === 1
+                    logId = Number(t[17])
+                    logHz = Number(t[18])
+                }
+                if (t.length > 21) {
+                    pBrkDecel.value = Number(t[19])
+                    pBrkOff.value = Number(t[20])
+                    pBrkRegen.value = Number(t[21])
+                }
+                if (!confLoaded) statusText = "Settings loaded from the controller"
+                confLoaded = true
+            }
+        }
+    }
+
+    // ==================================================================
+    //  Layout
+    // ==================================================================
+    ColumnLayout {
+        anchors.fill: parent
+        spacing: 6
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+            Text {
+                text: "CU Wheelie"
+                color: textColor
+                font.pixelSize: 22
+                font.bold: true
+            }
+            Text {
+                text: "Package {{VERSION}}"
+                color: dimText
+                font.pixelSize: 11
+                Layout.alignment: Qt.AlignBottom
+            }
+            Item { Layout.fillWidth: true }
+            Pill {
+                label: !ctrlLive ? "NO DATA" : (crash ? "CUTOFF" : (fault ? "IMU LOST" : (armed ? "ARMED" : "DISARMED")))
+                tone: !ctrlLive ? gridColor : ((crash || fault) ? badColor : (armed ? okColor : "#616161"))
+            }
+        }
+
+        TabBar {
+            id: tabs
+            Layout.fillWidth: true
+            TabButton { text: "Live" }
+            TabButton { text: "Tune" }
+            TabButton { text: "IMU Status" }
+        }
+
+        StackLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            currentIndex: tabs.currentIndex
+
+            // ======================== LIVE ========================
+            ScrollView {
+                id: liveScroll
+                clip: true
+                contentWidth: availableWidth
+
+                ColumnLayout {
+                    width: liveScroll.availableWidth
+                    spacing: 8
+
+                    Rectangle {
+                        visible: crash || fault
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: faultTxt.implicitHeight + 14
+                        radius: 6
+                        color: crash ? "#8E24AA" : badColor
+                        Text {
+                            id: faultTxt
+                            anchors.centerIn: parent
+                            width: parent.width - 16
+                            wrapMode: Text.WordWrap
+                            horizontalAlignment: Text.AlignHCenter
+                            text: crash ?
+                                  "CRASH CUTOFF - motor off. Release the throttle and stand the bike up." :
+                                  (lostPhase === 1 ? "IMU LOST - letting the front down" :
+                                  (lostPhase === 2 ? "IMU LOST - motor off. Release the throttle to get power back." :
+                                   "IMU LOST - CU Wheelie is OFF, throttle is yours. " +
+                                   "Comes back after 200 ms of good data below " + pStart.value.toFixed(0) + "°."))
+                            color: "#ffffff"
+                            font.pixelSize: 13
+                            font.bold: true
+                        }
+                    }
+
+                    Rectangle {
+                        visible: exIdle && !crash && !fault
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: idleTxt.implicitHeight + 14
+                        radius: 6
+                        color: "#5d4a12"
+                        Text {
+                            id: idleTxt
+                            anchors.centerIn: parent
+                            width: parent.width - 16
+                            wrapMode: Text.WordWrap
+                            horizontalAlignment: Text.AlignHCenter
+                            color: "#ffffff"
+                            font.pixelSize: 13
+                            font.bold: true
+                            text: "CU IMU connected but NOT IN USE: " +
+                                  (!(exRawFlags & 2) ? "IMU not OK." :
+                                   (!(exRawFlags & 1) ? "not levelled. Open CU IMU → Setup → Zero Level." :
+                                    "check the IMU source on the Tune tab.")) +
+                                  "  Showing its reading greyed out."
+                        }
+                    }
+
+                    // ---- Pitch gauge ----
+                    Card {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: Math.min(340, liveScroll.availableWidth * 0.62)
+
+                        SideView {
+                            anchors.fill: parent
+                            angle: exIdle ? exRawPitch : rtPitch
+                            startDeg: pStart.value
+                            endDeg: pEnd.value
+                            cutDeg: pCutPitch.value
+                            accent: exIdle ? gridColor : (fault || crash) ? badColor : (rtPitch >= pEnd.value ? badColor :
+                                    (rtPitch >= pStart.value ? warnColor : pitchColor))
+                        }
+                        Column {
+                            anchors.left: parent.left
+                            anchors.top: parent.top
+                            anchors.margins: 10
+                            Caption { text: "PITCH" }
+                            Text {
+                                property real p: exIdle ? exRawPitch : rtPitch
+                                text: (p >= 0 ? "+" : "") + p.toFixed(1) + "°"
+                                color: exIdle ? dimText : pitchColor
+                                font.pixelSize: 30
+                                font.bold: true
+                            }
+                            Text {
+                                text: rtRate.toFixed(0) + " °/s"
+                                color: dimText
+                                font.pixelSize: 12
+                            }
+                        }
+                        Column {
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            anchors.margins: 10
+                            spacing: 2
+                            Text { anchors.right: parent.right; text: "fade " + pStart.value.toFixed(0) + "°"; color: warnColor; font.pixelSize: 11 }
+                            Text { anchors.right: parent.right; text: "ceiling " + pEnd.value.toFixed(0) + "°"; color: badColor; font.pixelSize: 11 }
+                            Text { anchors.right: parent.right; text: "cutoff " + pCutPitch.value.toFixed(0) + "°"; color: "#CE93D8"; font.pixelSize: 11 }
+                        }
+                    }
+
+                    // ---- Roll + output ----
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        Card {
+                            Layout.preferredWidth: (liveScroll.availableWidth - 8) * 0.38
+                            Layout.preferredHeight: outCol.implicitHeight + 20
+
+                            RearView {
+                                anchors.fill: parent
+                                anchors.topMargin: 26
+                                angle: actSrc === 2 ? rtRoll : (exIdle ? exRawRoll : 0)
+                                accent: actSrc === 2 ? rollColor : gridColor
+                            }
+                            Caption {
+                                anchors.left: parent.left
+                                anchors.top: parent.top
+                                anchors.margins: 10
+                                text: "ROLL"
+                            }
+                            Text {
+                                anchors.right: parent.right
+                                anchors.top: parent.top
+                                anchors.margins: 8
+                                property real r: actSrc === 2 ? rtRoll : exRawRoll
+                                text: (actSrc === 2 || exIdle) ? ((r >= 0 ? "+" : "") + r.toFixed(1) + "°") : "-"
+                                color: actSrc === 2 ? rollColor : dimText
+                                font.pixelSize: 16
+                                font.bold: true
+                            }
+                        }
+
+                        Card {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: outCol.implicitHeight + 20
+
+                            ColumnLayout {
+                                id: outCol
+                                anchors.fill: parent
+                                anchors.margins: 10
+                                spacing: 6
+                                Bar { name: "Throttle"; value: rtRider; tone: textColor }
+                                Bar { name: "Motor output"; value: rtOut; from: -1; to: 1; tone: pitchColor }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Pill {
+                                        label: srcNames[actSrc]
+                                        tone: actSrc === 2 ? okColor : (actSrc === 1 ? "#616161" : badColor)
+                                    }
+                                    Pill {
+                                        label: "BRAKE"
+                                        tone: brakeOn ? badColor : "#3a3a3a"
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: exAge < 0 ? "no Express data" :
+                                              (exAge.toFixed(0) + " ms  ·  " + exDrops + " drop/s")
+                                        color: dimText
+                                        font.pixelSize: 11
+                                        elide: Text.ElideRight
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Button {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 48
+                        text: armed ? "DISARM" : "ARM"
+                        font.pixelSize: 16
+                        font.bold: true
+                        onClicked: sendCmd(3)
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        color: dimText
+                        font.pixelSize: 11
+                        text: "Boots disarmed. Normal throttle while disarmed. Test on a stand first."
+                    }
+                }
+            }
+
+            // ======================== TUNE ========================
+            ScrollView {
+                id: tuneScroll
+                clip: true
+                contentWidth: availableWidth
+
+                ColumnLayout {
+                    width: tuneScroll.availableWidth
+                    spacing: 12
+
+                    Caption { text: "LIMITER" }
+                    ParamSlider {
+                        id: pStart
+                        name: "Throttle fade start"
+                        hint: "Throttle starts fading out above this angle"
+                        units: "°"; decimals: 1
+                        from: 0; to: 60; stepSize: 0.5; value: 25
+                    }
+                    ParamSlider {
+                        id: pEnd
+                        name: "Ceiling"
+                        hint: "Pull-down engages past this angle"
+                        units: "°"; decimals: 1
+                        from: 10; to: 75; stepSize: 0.5; value: 45
+                    }
+                    ParamSlider {
+                        id: pDamp
+                        name: "Pitch-rate damping"
+                        hint: "Resists fast nose movement"
+                        decimals: 4
+                        from: 0; to: 0.1; stepSize: 0.001; value: 0.01
+                    }
+                    ParamSlider {
+                        id: pPull
+                        name: "Max pull-down current"
+                        decimals: 2
+                        from: 0; to: 1.0; stepSize: 0.01; value: 0.6
+                    }
+                    ParamSlider {
+                        id: pLpf
+                        name: "Gyro low-pass (alpha)"
+                        decimals: 2
+                        from: 0.02; to: 1.0; stepSize: 0.01; value: 0.2
+                    }
+
+                    Caption { text: "SAFETY" }
+                    ParamSlider {
+                        id: pCutPitch
+                        name: "Crash cutoff: pitch"
+                        hint: "Motor off if the nose goes past this (looped / on its back)"
+                        units: "°"; decimals: 0
+                        from: 40; to: 90; stepSize: 1; value: 70
+                    }
+                    Text {
+                        visible: pCutPitch.value <= pEnd.value + 5
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        color: badColor
+                        font.pixelSize: 12
+                        text: "Cutoff should be well above the ceiling (" + pEnd.value.toFixed(0) + "°)."
+                    }
+                    ParamSlider {
+                        id: pCutRoll
+                        name: "Crash cutoff: roll"
+                        hint: "Motor off if the bike leans past this (on its side)"
+                        units: "°"; decimals: 0
+                        from: 30; to: 90; stepSize: 1; value: 60
+                    }
+                    ParamSlider {
+                        id: pCutMs
+                        name: "Crash cutoff delay"
+                        hint: "Must stay past the limit this long, so bumps don't trip it"
+                        units: " ms"; decimals: 0
+                        from: 50; to: 1000; stepSize: 10; value: 250
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Text { text: "Crash cutoff active"; color: textColor; font.pixelSize: 14; Layout.fillWidth: true }
+                        ComboBox {
+                            id: cbCutMode
+                            model: ["Only when armed", "Always"]
+                            currentIndex: 1
+                            Layout.preferredWidth: 170
+                        }
+                    }
+                    ParamSlider {
+                        id: pLetdown
+                        name: "IMU lost: let-down time"
+                        hint: "If the IMU drops out while armed, power fades to zero over this time, " +
+                              "then stays off until the throttle is released"
+                        units: " s"; decimals: 1
+                        from: 0.3; to: 3.0; stepSize: 0.1; value: 1.0
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        color: dimText
+                        font.pixelSize: 11
+                        text: "After a cutoff the motor stays off until the throttle is released and the bike is upright."
+                    }
+
+                    Caption { text: "BRAKE LIGHT" }
+                    ParamSlider {
+                        id: pBrkDecel
+                        name: "Braking deceleration"
+                        units: " m/s²  (" + (pBrkDecel.value * 2.237).toFixed(1) + " mph/s)"; decimals: 1
+                        hint: "Brake light when speed drops faster than this. Live: " +
+                              decel.toFixed(1) + " m/s²" + (brakeOn ? "  BRAKE ON" : "")
+                        from: 0.3; to: 6.0; stepSize: 0.1; value: 1.5
+                    }
+                    ParamSlider {
+                        id: pBrkOff
+                        name: "Rolled-off time"
+                        units: " s"; decimals: 1
+                        hint: "Throttle fully off this long while moving (over 3 mph) and slowing. 0 = off"
+                        from: 0; to: 10; stepSize: 0.5; value: 2.0
+                    }
+                    ParamSlider {
+                        id: pBrkRegen
+                        name: "Regen current"
+                        units: " A"; decimals: 0
+                        hint: "Motor current below minus this counts as braking. 0 = off"
+                        from: 0; to: 50; stepSize: 1; value: 3
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        color: dimText
+                        font.pixelSize: 11
+                        text: "Also on while CU Wheelie is pulling the nose down. The Express shows it on its tail light."
+                    }
+
+                    Caption { text: "IMU SOURCE" }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Text { text: "Source"; color: textColor; font.pixelSize: 14; Layout.fillWidth: true }
+                        ComboBox {
+                            id: cbSource
+                            model: ["Controller IMU", "CU IMU", "Auto (CU IMU, then controller)"]
+                            currentIndex: 2
+                            Layout.preferredWidth: 230
+                        }
+                    }
+                    ParamSlider {
+                        id: pStale
+                        name: "IMU data timeout"
+                        hint: "Older data counts as lost"
+                        units: " ms"; decimals: 0
+                        from: 20; to: 200; stepSize: 5; value: 50
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Button { text: "Read"; Layout.fillWidth: true; onClicked: sendCmd(1) }
+                        Button { text: "Write && Save"; Layout.fillWidth: true; onClicked: writeConfig() }
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        color: warnColor
+                        font.pixelSize: 12
+                        text: "Pull-down needs l_min_erpm below 0 in the motor config."
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        Layout.topMargin: 8
+                        wrapMode: Text.WordWrap
+                        color: dimText
+                        font.pixelSize: 11
+                        text: "Control loop based on Wheelie Assist by 3ShulMotors (GPL-3.0)."
+                    }
+                }
+            }
+
+            // ====================== IMU STATUS ======================
+            ScrollView {
+                id: calScroll
+                clip: true
+                contentWidth: availableWidth
+
+                ColumnLayout {
+                    width: calScroll.availableWidth
+                    spacing: 8
+
+                    Flow {
+                        Layout.fillWidth: true
+                        spacing: 6
+                        Pill { label: imuDataLive ? "IMU DATA LIVE" : "NO LIVE IMU DATA"; tone: imuDataLive ? okColor : badColor }
+                        Pill { label: !imuStatusLive ? "IMU: —" : ((imuFlags & 2) ? "IMU OK" : "IMU FAULT"); tone: !imuStatusLive ? gridColor : ((imuFlags & 2) ? okColor : badColor) }
+                        Pill { label: !imuStatusLive ? "LEVEL: —" : ((imuFlags & 1) ? "LEVELED" : "NOT LEVELED"); tone: !imuStatusLive ? gridColor : ((imuFlags & 1) ? okColor : badColor) }
+                        Pill { label: "CONTROLLER: " + (ctrlLive ? srcNames[actSrc] : "OFFLINE"); tone: ctrlLive && actSrc === 2 ? okColor : badColor }
+                    }
+
+                    RowLayout {
+                        id: calViews
+                        Layout.fillWidth: true
+                        spacing: 8
+                        property real viewH: Math.min(260, calScroll.availableWidth * 0.42)
+
+                        Card {
+                            Layout.preferredWidth: (calScroll.availableWidth - 8) * 0.62
+                            Layout.preferredHeight: calViews.viewH
+                            SideView { anchors.fill: parent; anchors.topMargin: 20; angle: imuPitch; opacity: imuDataLive ? 1 : 0.3 }
+                            Caption { anchors.left: parent.left; anchors.top: parent.top; anchors.margins: 10; text: "PITCH" }
+                            Text {
+                                anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 8
+                                text: imuDataLive ? ((imuPitch >= 0 ? "+" : "") + imuPitch.toFixed(1) + "°") : "—"
+                                color: pitchColor; font.pixelSize: 20; font.bold: true
+                            }
+                        }
+                        Card {
+                            Layout.preferredWidth: (calScroll.availableWidth - 8) * 0.38
+                            Layout.preferredHeight: calViews.viewH
+                            RearView { anchors.fill: parent; anchors.topMargin: 26; angle: imuRoll; opacity: imuDataLive ? 1 : 0.3 }
+                            Caption { anchors.left: parent.left; anchors.top: parent.top; anchors.margins: 10; text: "ROLL" }
+                            Text {
+                                anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 8
+                                text: imuDataLive ? ((imuRoll >= 0 ? "+" : "") + imuRoll.toFixed(1) + "°") : "—"
+                                color: rollColor; font.pixelSize: 20; font.bold: true
+                            }
+                        }
+                    }
+
+                    Card {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: ctrlCol.implicitHeight + 16
+                        ColumnLayout {
+                            id: ctrlCol
+                            anchors.fill: parent
+                            anchors.margins: 8
+                            spacing: 2
+                            Text {
+                                color: textColor
+                                font.family: "DejaVu Sans Mono"
+                                font.pixelSize: 12
+                                text: ctrlLive ? ("controller sees  " + (rtPitch >= 0 ? "+" : "") + rtPitch.toFixed(1) +
+                                      "°  (" + srcNames[actSrc].toLowerCase() + ")") : "controller data unavailable"
+                            }
+                            Text {
+                                color: dimText
+                                font.family: "DejaVu Sans Mono"
+                                font.pixelSize: 12
+                                text: ctrlLive ? ("express frames   " + (exAge < 0 ? "none" :
+                                      (exAge.toFixed(0) + " ms old, " + exDrops + " dropped/s"))) : "express frame age unavailable"
+                            }
+                        }
+                    }
+
+                    Card {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: setupHelp.implicitHeight + 24
+                        Text {
+                            id: setupHelp
+                            anchors.fill: parent
+                            anchors.margins: 12
+                            wrapMode: Text.WordWrap
+                            color: textColor
+                            font.pixelSize: 13
+                            text: "IMU setup is on Express\n\n" +
+                                  "Stop and disarm CU Wheelie. Connect VESC Tool directly to the Express board over Bluetooth, then open APPUI → Setup.\n\n" +
+                                  "Save the mounting axes there, then use Zero Level with the bike level and still. This page shows the IMU data reaching the controller."
+                        }
+                    }
+                }
+            }
+        }
+
+        Text {
+            Layout.fillWidth: true
+            text: statusText
+            color: dimText
+            font.pixelSize: 11
+            elide: Text.ElideRight
+        }
+    }
+}

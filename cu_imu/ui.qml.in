@@ -1,0 +1,871 @@
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import QtQuick.Layouts 1.3
+
+import Vedder.vesc.commands 1.0
+import Vedder.vesc.utility 1.0
+
+Item {
+    id: root
+    anchors.fill: parent
+    anchors.margins: 8
+
+    property Commands mCommands: VescIf.commands()
+    property bool confLoaded: false
+
+    // Live view ("v" frames, 25 Hz)
+    property real rtPitch: 0.0
+    property real rtRoll: 0.0
+    property real rtRate: 0.0
+    property double lastRx: 0
+    property double lastStatusRx: 0
+    property double lastLinkRx: 0
+    property bool statusLive: false
+    property bool linkLive: false
+    property int setupState: -1
+    property string boardVersion: ""
+
+    // Status ("rt" frames, 5 Hz)
+    property real rtHz: 0.0
+    property int rtErrs: 0
+    property int rtTx: 0
+    property int rtFlags: 0
+    property bool rtChip: false
+    property real rtF: 0.0
+    property real rtL: 0.0
+    property real rtU: 0.0
+    property bool rtCalBusy: false
+    property real rtWork: 0.0
+    property real rtWorkAvg: 0.0
+    property bool calValid: statusLive && (rtFlags & 1) !== 0
+    property bool imuOk: statusLive && (rtFlags & 2) !== 0
+    property bool gated: (rtFlags & 4) !== 0
+    property bool live: false
+    property int canOff: 0
+    property real chipTemp: -100
+    property real lightScale: 1.0
+    property int devFwd: 0      // mount axes as saved on the board
+    property int devUp: 4
+    property real devAlpha: 0.98
+    property real devGate: 0.3
+    property int devTx: 1
+    property string statusText: "Connecting to script..."
+    // the link: paired with a screen, hearing it, the controller, CU Wheelie
+    property bool lkPaired: false
+    property bool lkScreen: false
+    property bool lkEsc: false
+    property int lkEscId: -1
+    property bool lkWheelie: false
+    readonly property bool settingsLive: confLoaded && live && statusLive && linkLive
+    readonly property bool setupReady: settingsLive && setupState === 0 && !rtCalBusy
+    readonly property bool mountDirty: cbFwd.currentIndex !== devFwd || cbUp.currentIndex !== devUp
+    readonly property bool mountValid: Math.floor(cbFwd.currentIndex / 2) !== Math.floor(cbUp.currentIndex / 2)
+
+    function updateFreshness() {
+        var now = Date.now()
+        live = lastRx > 0 && now - lastRx < 600
+        statusLive = lastStatusRx > 0 && now - lastStatusRx < 600
+        linkLive = lastLinkRx > 0 && now - lastLinkRx < 600
+    }
+
+    readonly property color okColor: "#66BB6A"
+    readonly property color badColor: "#FF5252"
+    readonly property color pitchColor: "#FF9F1C"
+    readonly property color rollColor: "#4FC3F7"
+    readonly property color panelColor: "#2b2b2b"
+    readonly property color gridColor: "#4a4a4a"
+    readonly property color textColor: Utility.getAppHexColor("lightText")
+    readonly property var axisNames: ["+X", "-X", "+Y", "-Y", "+Z", "-Z"]
+    readonly property color warnColor: "#FFC107"
+    readonly property color textColorDim: "#9a9a9a"
+
+    // ==================================================================
+    //  Bike drawings (from reference/sketches/*.svg, drawn on a Canvas)
+    // ==================================================================
+    function strokeSvg(c, d) {
+        var tok = d.match(/[MLZ]|-?[0-9]*\.?[0-9]+/g)
+        var i = 0
+        c.beginPath()
+        while (i < tok.length) {
+            var t = tok[i]
+            if (t === "M") { c.moveTo(Number(tok[i + 1]), Number(tok[i + 2])); i += 3 }
+            else if (t === "L") { c.lineTo(Number(tok[i + 1]), Number(tok[i + 2])); i += 3 }
+            else if (t === "Z") { c.closePath(); i++ }
+            else i++
+        }
+        c.stroke()
+    }
+
+    function strokeRRect(c, r) {
+        c.beginPath()
+        c.roundedRect(r[0], r[1], r[2], r[3], r[4], r[4])
+        c.stroke()
+    }
+
+    // Side profile, facing left. Pivots on the rear tyre contact patch.
+    readonly property var sidePaths: [
+        "M-50.99 -39.57 L-7.5 -25.5 L-7.5 4 L-40 4 L-52.15 -36.7 Z",
+        "M-39.86 -64.22 L-49.86 -42.35 L-54.96 -29.75 L-56.46 -26.04 L-71.21 3.81",
+        "M-7.5 -25.5 L20.91 -28.83",
+        "M-7.5 -15 L17.11 -28.83",
+        "M-7.5 4 L0 0 L40.79 0.17"]
+    readonly property var sideRRects: [[-17.5, -36.32, 41, 6.6, 3.3]]
+    readonly property var sideWheels: [[-71.21, 3.81, 20.7], [40.79, 0.17, 24.34]]
+
+    // Rear view. Pivots on the tyre contact patch.
+    readonly property var rearPaths: [
+        "M-27.5 -48.32 L27.5 -48.32",
+        "M0 -48.32 L0 -37.32",
+        "M-20.3 4 L-11 4",
+        "M11 4 L20.3 4"]
+    readonly property var rearRRects: [[-8.5, -36.32, 17, 5.2, 2.6], [-6.5, -24.17, 13, 48.68, 6.2]]
+
+    component SideView: Canvas {
+        property real angle: 0          // deg, nose up +
+        property real startDeg: -1      // fade start zone (deg), -1 = none
+        property real endDeg: -1        // ceiling zone (deg), -1 = none
+        property color accent: pitchColor
+        property real shown: Math.max(-35, Math.min(85, angle))
+        Behavior on shown { NumberAnimation { duration: 60 } }
+        onShownChanged: requestPaint()
+        onStartDegChanged: requestPaint()
+        onEndDegChanged: requestPaint()
+        onAccentChanged: requestPaint()
+        onWidthChanged: requestPaint()
+        onHeightChanged: requestPaint()
+
+        onPaint: {
+            var c = getContext("2d")
+            c.reset()
+            var m = 8
+            var s = Math.min((width - 2 * m) / 180, (height - 2 * m) / 150)
+            var px = width - m - 32 * s, py = height - m - 6 * s
+            var R = 150 * s
+
+            // fade / ceiling zones, fanned out from the pivot toward the front
+            if (endDeg > 0) {
+                var a0 = Math.PI + startDeg * Math.PI / 180
+                var a1 = Math.PI + endDeg * Math.PI / 180
+                c.globalAlpha = 0.14
+                c.fillStyle = warnColor
+                c.beginPath(); c.moveTo(px, py); c.arc(px, py, R, a0, a1, false); c.closePath(); c.fill()
+                c.fillStyle = badColor
+                c.beginPath(); c.moveTo(px, py); c.arc(px, py, R, a1, Math.PI * 1.5, false); c.closePath(); c.fill()
+                c.globalAlpha = 1
+                c.lineWidth = 1
+                c.font = "11px sans-serif"
+                var rays = [[startDeg, warnColor], [endDeg, badColor]]
+                for (var k = 0; k < rays.length; k++) {
+                    var a = Math.PI + rays[k][0] * Math.PI / 180
+                    c.strokeStyle = rays[k][1]
+                    c.beginPath(); c.moveTo(px, py); c.lineTo(px + R * Math.cos(a), py + R * Math.sin(a)); c.stroke()
+                    c.fillStyle = rays[k][1]
+                    c.fillText(rays[k][0].toFixed(0) + "°", px + (R + 4) * Math.cos(a) - 10, py + (R + 4) * Math.sin(a))
+                }
+            }
+
+            // ground
+            c.strokeStyle = gridColor
+            c.lineWidth = 1
+            c.beginPath(); c.moveTo(m, py); c.lineTo(width - m, py); c.stroke()
+
+            // bike
+            c.save()
+            c.translate(px, py)
+            c.rotate(shown * Math.PI / 180)
+            c.scale(s, s)
+            c.translate(-40.79, -24.51)
+            c.lineCap = "round"
+            c.lineJoin = "round"
+            c.lineWidth = 3
+            c.strokeStyle = textColor
+            for (var w = 0; w < sideWheels.length; w++) {
+                c.beginPath(); c.arc(sideWheels[w][0], sideWheels[w][1], sideWheels[w][2], 0, 2 * Math.PI); c.stroke()
+            }
+            c.strokeStyle = accent
+            for (var i = 0; i < sidePaths.length; i++) strokeSvg(c, sidePaths[i])
+            for (var j = 0; j < sideRRects.length; j++) strokeRRect(c, sideRRects[j])
+            c.restore()
+        }
+    }
+
+    component RearView: Canvas {
+        property real angle: 0          // deg, lean right +
+        property color accent: rollColor
+        property real shown: Math.max(-70, Math.min(70, angle))
+        Behavior on shown { NumberAnimation { duration: 60 } }
+        onShownChanged: requestPaint()
+        onAccentChanged: requestPaint()
+        onWidthChanged: requestPaint()
+        onHeightChanged: requestPaint()
+
+        onPaint: {
+            var c = getContext("2d")
+            c.reset()
+            var m = 8
+            var s = Math.min((width - 2 * m) / 120, (height - 2 * m) / 84)
+            var px = width / 2, py = height - m - 2 * s
+            c.strokeStyle = gridColor
+            c.lineWidth = 1
+            c.beginPath(); c.moveTo(m, py); c.lineTo(width - m, py); c.stroke()
+            c.beginPath(); c.moveTo(px, py); c.lineTo(px, py - 80 * s); c.stroke()
+
+            c.save()
+            c.translate(px, py)
+            c.rotate(shown * Math.PI / 180)
+            c.scale(s, s)
+            c.translate(0, -24.51)
+            c.lineCap = "round"
+            c.lineJoin = "round"
+            c.lineWidth = 3
+            c.strokeStyle = textColor
+            strokeRRect(c, rearRRects[1])           // tyre
+            c.strokeStyle = accent
+            strokeRRect(c, rearRRects[0])
+            for (var i = 0; i < rearPaths.length; i++) strokeSvg(c, rearPaths[i])
+            c.restore()
+        }
+    }
+
+
+    component Lbl: Text {
+        color: textColor
+        font.pixelSize: 14
+    }
+
+    component Pill: Rectangle {
+        property string label: ""
+        property bool ok: false
+        property bool known: true
+        radius: 4
+        color: !known ? gridColor : (ok ? okColor : badColor)
+        width: pillText.implicitWidth + 14
+        height: pillText.implicitHeight + 6
+        Text {
+            id: pillText
+            anchors.centerIn: parent
+            text: parent.label
+            color: "#ffffff"
+            font.pixelSize: 11
+            font.bold: true
+        }
+    }
+
+    // ---- Comm helpers ----
+    function sendCmd(c) {
+        if ((c === 3 || c === 4) && (!setupReady || (c === 3 && (mountDirty || !imuOk)))) {
+            statusText = "Stop, disarm Wheelie, and load the saved mount before IMU setup"
+            return
+        }
+        var buffer = new ArrayBuffer(1)
+        var dv = new DataView(buffer)
+        dv.setUint8(0, c)
+        mCommands.sendCustomAppData(buffer)
+    }
+
+    readonly property var partyModes: ["Rainbow flow", "Colour cycle", "Breathing",
+                                       "Scanner", "Comet", "Police", "Sparkle"]
+
+    function preview(kind, secs) {
+        if (!settingsLive) return
+        var buffer = new ArrayBuffer(3)
+        var dv = new DataView(buffer)
+        dv.setUint8(0, 8)
+        dv.setUint8(1, kind)
+        dv.setUint8(2, Math.round(secs * 10))
+        mCommands.sendCustomAppData(buffer)
+    }
+
+    // tail light controls apply on their own, shortly after you let go
+    Timer {
+        id: liveWrite
+        interval: 300
+        onTriggered: writeConfig(true)
+    }
+
+    function setPartyMode(m) {
+        if (!settingsLive) return
+        var buffer = new ArrayBuffer(2)
+        var dv = new DataView(buffer)
+        dv.setUint8(0, 7)
+        dv.setUint8(1, m)
+        mCommands.sendCustomAppData(buffer)
+    }
+
+    function setParty(on) {
+        if (!settingsLive) return
+        var buffer = new ArrayBuffer(2)
+        var dv = new DataView(buffer)
+        dv.setUint8(0, 6)
+        dv.setUint8(1, on ? 1 : 0)
+        mCommands.sendCustomAppData(buffer)
+    }
+
+    // keepMount: send the board's saved axes (live tail-light writes must not
+    // save half-edited mount axes, which would clear the Zero Level)
+    function writeConfig(keepMount) {
+        if (!settingsLive || (!keepMount && (!setupReady || !mountValid))) {
+            statusText = "Wait for live Express data, stop and disarm before saving IMU settings"
+            return
+        }
+        var buffer = new ArrayBuffer(36)
+        var dv = new DataView(buffer)
+        dv.setUint8(0, 2)
+        // bytes 1-4 (chip, SDA, SCL, I2C speed) are fixed by the Express Open PCB
+        dv.setUint8(1, 2)
+        dv.setUint8(2, 7)
+        dv.setUint8(3, 6)
+        dv.setUint8(4, 1)
+        dv.setUint8(5, keepMount ? devFwd : cbFwd.currentIndex)
+        dv.setUint8(6, keepMount ? devUp : cbUp.currentIndex)
+        dv.setFloat32(7, keepMount ? devAlpha : slAlpha.value)
+        dv.setUint8(11, canOff)      // not shown: stays as loaded (0 = 0x5A0)
+        dv.setUint8(12, devTx)
+        dv.setFloat32(13, keepMount ? devGate : slGate.value)
+        dv.setUint8(17, cbTl.checked ? 1 : 0)
+        dv.setUint8(18, 5)
+        dv.setUint8(19, sbTlCount.value)
+        dv.setUint8(20, cbTlType.currentIndex)
+        dv.setFloat32(21, slTlRun.value)
+        dv.setFloat32(25, slTlBrk.value)
+        dv.setFloat32(29, slTlParty.value)
+        dv.setUint8(33, cbPartyMode.currentIndex)
+        dv.setUint8(34, Math.round(slTlSpeed.value * 100))
+        dv.setUint8(35, Math.round(slTlTemp.value))
+        mCommands.sendCustomAppData(buffer)
+        statusText = "Writing..."
+    }
+
+    // A mount save preserves filter, CAN and tail-light settings.
+    function saveMount() {
+        if (!setupReady || !mountValid) {
+            statusText = "Choose different forward/up axes, stop and disarm before saving"
+            return
+        }
+        var buffer = new ArrayBuffer(17)
+        var dv = new DataView(buffer)
+        dv.setUint8(0, 2)
+        dv.setUint8(1, 2); dv.setUint8(2, 7); dv.setUint8(3, 6); dv.setUint8(4, 1)
+        dv.setUint8(5, cbFwd.currentIndex); dv.setUint8(6, cbUp.currentIndex)
+        dv.setFloat32(7, devAlpha)
+        dv.setUint8(11, canOff); dv.setUint8(12, devTx); dv.setFloat32(13, devGate)
+        mCommands.sendCustomAppData(buffer)
+        statusText = "Saving mount on Express..."
+    }
+
+    Component.onCompleted: sendCmd(1)
+
+    Timer {
+        interval: 1000
+        running: !confLoaded
+        repeat: true
+        onTriggered: sendCmd(1)
+    }
+
+    // Keepalive: the Express only streams while a page pings it
+    Timer {
+        interval: 1000
+        running: confLoaded
+        repeat: true
+        onTriggered: sendCmd(5)
+    }
+
+    // Mark the view stale when frames stop arriving
+    Timer {
+        interval: 250
+        running: true
+        repeat: true
+        onTriggered: updateFreshness()
+    }
+
+    Connections {
+        target: mCommands
+        function onCustomAppDataReceived(data) {
+            var str = data.toString()
+            var t = str.split(" ")
+            if (t[0] === "xv" && t.length >= 4) {
+                rtPitch = Number(t[1])
+                rtRoll = Number(t[2])
+                rtRate = Number(t[3])
+                lastRx = Date.now()
+                live = true
+                graph.push(rtPitch, rtRoll)
+            } else if (t[0] === "xconf" && t.length >= 25) {
+                cbFwd.currentIndex = Number(t[5])
+                cbUp.currentIndex = Number(t[6])
+                devFwd = Number(t[5])
+                devUp = Number(t[6])
+                devAlpha = Number(t[7])
+                devTx = Number(t[9])
+                devGate = Number(t[10])
+                slAlpha.value = Number(t[7])
+                canOff = Number(t[8])
+                slGate.value = Number(t[10])
+                offsetsText.text = "Level offsets: pitch " + Number(t[12]).toFixed(2) +
+                        "°, roll " + Number(t[13]).toFixed(2) + "°"
+                if (t.length > 21) {
+                    cbTl.checked = Number(t[14]) === 1
+                    sbTlCount.value = Number(t[16])
+                    cbTlType.currentIndex = Number(t[17])
+                    slTlRun.value = Number(t[18])
+                    slTlBrk.value = Number(t[19])
+                    swParty.checked = Number(t[20]) === 1
+                    slTlParty.value = Number(t[21])
+                }
+                if (t.length > 23) {
+                    cbPartyMode.currentIndex = Number(t[22])
+                    slTlSpeed.value = Number(t[23])
+                }
+                if (t.length > 24) slTlTemp.value = Number(t[24])
+                if (!confLoaded) {
+                    statusText = "Config loaded from Express"
+                }
+                confLoaded = true
+            } else if (t[0] === "xrt" && t.length >= 16) {
+                lastStatusRx = Date.now()
+                rtHz = Number(t[4])
+                rtErrs = Number(t[5])
+                rtTx = Number(t[6])
+                rtFlags = Number(t[7])
+                rtChip = Number(t[8]) === 1
+                rtF = Number(t[9])
+                rtL = Number(t[10])
+                rtU = Number(t[11])
+                rtCalBusy = Number(t[13]) === 1
+                rtWork = Number(t[14])
+                rtWorkAvg = Number(t[15])
+                if (t.length > 17) {
+                    chipTemp = Number(t[16])
+                    lightScale = Number(t[17])
+                }
+            } else if (t[0] === "xlink" && t.length >= 6) {
+                lastLinkRx = Date.now()
+                lkPaired = t[1] === "1"; lkScreen = t[2] === "1"; lkEsc = t[3] === "1"
+                lkEscId = Number(t[4]); lkWheelie = t[5] === "1"
+                setupState = t.length >= 8 ? Number(t[6]) : -1
+                boardVersion = t.length >= 8 ? t[7] : ""
+            } else if (t[0] === "xmsg") {
+                statusText = str.substring(5)
+                if (statusText === "Zero Level saved" || statusText.indexOf("Settings saved") === 0) {
+                    sendCmd(1)
+                }
+            }
+        }
+    }
+
+    ColumnLayout {
+        anchors.fill: parent
+        spacing: 6
+
+        RowLayout {
+            Layout.fillWidth: true
+            Text {
+                text: "CU IMU"
+                color: textColor
+                font.pixelSize: 20
+                font.bold: true
+            }
+            Item { Layout.fillWidth: true }
+            Text {
+                text: "Package {{VERSION}}"
+                color: textColor
+                font.pixelSize: 12
+                Layout.alignment: Qt.AlignBottom
+            }
+        }
+
+        Text {
+            visible: boardVersion.length > 0
+            text: "Device build: " + boardVersion
+            color: textColor
+            font.pixelSize: 12
+        }
+
+        // the Charged Up link side of this board
+        Text {
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+            font.pixelSize: 12
+            color: linkLive && lkScreen ? "#22c55e" : textColor
+            text: !linkLive ? "Waiting for Express link status..." : "Link: " + (lkScreen ? "screen connected" : (lkPaired ? "paired screen not heard" : "no screen paired yet")) +
+                  "   Controller: " + (lkEsc ? ("CAN id " + lkEscId) : "not found") +
+                  (lkWheelie ? "   CU Wheelie: found" : "")
+        }
+
+        TabBar {
+            id: tabs
+            Layout.fillWidth: true
+            TabButton { text: "Live" }
+            TabButton { text: "Setup" }
+        }
+
+        StackLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            currentIndex: tabs.currentIndex
+
+            // ================= LIVE =================
+            ScrollView {
+                id: liveScroll
+                clip: true
+                contentWidth: availableWidth
+
+                ColumnLayout {
+                    width: liveScroll.availableWidth
+                    spacing: 8
+
+                    Flow {
+                        Layout.fillWidth: true
+                        spacing: 6
+                        Pill { label: live ? "LIVE" : "NO DATA"; ok: live }
+                        Pill { label: !statusLive ? "CHIP: —" : (rtChip ? "CHIP OK" : "NO CHIP"); ok: rtChip; known: statusLive }
+                        Pill { label: !statusLive ? "IMU: —" : (imuOk ? "IMU OK" : "IMU FAULT"); ok: imuOk; known: statusLive }
+                        Pill { label: !statusLive ? "LEVEL: —" : (calValid ? "LEVELED" : "NOT LEVELED"); ok: calValid; known: statusLive }
+                        Pill { label: gated ? "ACCEL GATED" : "ACCEL USED"; ok: !gated }
+                    }
+
+                    // ---- Side view (pitch) and rear view (roll) ----
+                    RowLayout {
+                        // sized from the page width only (no width<->height loops)
+                        property real viewH: Math.min(320, liveScroll.availableWidth * 0.5)
+                        id: viewRow
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        Rectangle {
+                            id: sideBox
+                            Layout.preferredWidth: (liveScroll.availableWidth - 8) * 0.62
+                            Layout.preferredHeight: viewRow.viewH
+                            radius: 8
+                            color: panelColor
+                            SideView { anchors.fill: parent; anchors.topMargin: 22; angle: rtPitch }
+                            Text { anchors.left: parent.left; anchors.top: parent.top; anchors.margins: 8
+                                   text: "PITCH"; color: textColorDim; font.pixelSize: 11; font.bold: true }
+                            Text { anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 6
+                                   text: (rtPitch >= 0 ? "+" : "") + rtPitch.toFixed(1) + "°"
+                                   color: pitchColor; font.pixelSize: 20; font.bold: true }
+                            Text { anchors.left: parent.left; anchors.bottom: parent.bottom; anchors.margins: 6
+                                   text: rtRate.toFixed(0) + " °/s"; color: textColorDim; font.pixelSize: 11 }
+                        }
+
+                        Rectangle {
+                            id: rearBox
+                            Layout.preferredWidth: (liveScroll.availableWidth - 8) * 0.38
+                            Layout.preferredHeight: viewRow.viewH
+                            radius: 8
+                            color: panelColor
+                            RearView { anchors.fill: parent; anchors.topMargin: 28; angle: rtRoll }
+                            Text { anchors.left: parent.left; anchors.top: parent.top; anchors.margins: 8
+                                   text: "ROLL"; color: textColorDim; font.pixelSize: 11; font.bold: true }
+                            Text { anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 6
+                                   text: (rtRoll >= 0 ? "+" : "") + rtRoll.toFixed(1) + "°"
+                                   color: rollColor; font.pixelSize: 20; font.bold: true }
+                        }
+                    }
+
+                    // ---- 10 s history ----
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 150
+                        radius: 6
+                        color: panelColor
+
+                        Canvas {
+                            id: graph
+                            anchors.fill: parent
+                            anchors.margins: 6
+                            property int maxPts: 250          // 10 s at 25 Hz
+                            property var pitchPts: []
+                            property var rollPts: []
+
+                            function push(p, r) {
+                                pitchPts.push(p)
+                                rollPts.push(r)
+                                if (pitchPts.length > maxPts) {
+                                    pitchPts.shift()
+                                    rollPts.shift()
+                                }
+                                requestPaint()
+                            }
+
+                            onPaint: {
+                                var c = getContext("2d")
+                                c.reset()
+                                var w = width, h = height
+                                // scale: at least +-20 deg, grows to fit
+                                var m = 20
+                                for (var i = 0; i < pitchPts.length; i++) {
+                                    m = Math.max(m, Math.abs(pitchPts[i]), Math.abs(rollPts[i]))
+                                }
+                                m = Math.ceil(m / 10) * 10
+                                var y0 = h / 2, k = (h / 2 - 2) / m
+
+                                c.strokeStyle = gridColor
+                                c.lineWidth = 1
+                                c.fillStyle = gridColor
+                                c.font = "10px sans-serif"
+                                var step = m <= 30 ? 10 : (m <= 60 ? 20 : 30)
+                                for (var g = -m; g <= m; g += step) {
+                                    var gy = y0 - g * k
+                                    c.beginPath(); c.moveTo(0, gy); c.lineTo(w, gy); c.stroke()
+                                    c.fillText(g + "°", 2, gy - 2)
+                                }
+
+                                function line(pts, col) {
+                                    if (pts.length < 2) return
+                                    c.strokeStyle = col
+                                    c.lineWidth = 2
+                                    c.beginPath()
+                                    var dx = w / (maxPts - 1)
+                                    var x0 = w - (pts.length - 1) * dx
+                                    for (var j = 0; j < pts.length; j++) {
+                                        var px = x0 + j * dx, py = y0 - pts[j] * k
+                                        if (j === 0) c.moveTo(px, py); else c.lineTo(px, py)
+                                    }
+                                    c.stroke()
+                                }
+                                line(rollPts, rollColor)
+                                line(pitchPts, pitchColor)
+
+                                c.fillStyle = pitchColor
+                                c.fillText("pitch", w - 70, 12)
+                                c.fillStyle = rollColor
+                                c.fillText("roll", w - 32, 12)
+                            }
+                        }
+                    }
+
+                    // ---- Status ----
+                    Text {
+                        Layout.fillWidth: true
+                        font.pixelSize: 11
+                        color: lightScale < 0.99 ? "#FFC107" : "#9a9a9a"
+                        text: "IMU " + rtHz.toFixed(0) + " Hz  ·  board " +
+                              (chipTemp > -50 ? (chipTemp.toFixed(0) + "°C") : "?") +
+                              (lightScale < 0.99 ? ("  ·  tail light dimmed to " + (lightScale * 100).toFixed(0) + "% (hot)") : "") +
+                              (rtErrs > 0 ? ("  ·  I2C errors " + rtErrs) : "")
+                    }
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: partyRow.implicitHeight + 12
+                        radius: 6
+                        color: panelColor
+                        RowLayout {
+                            id: partyRow
+                            anchors.fill: parent
+                            anchors.margins: 6
+                            Text {
+                                text: "Party mode"
+                                color: textColor
+                                font.pixelSize: 14
+                            }
+                            ComboBox {
+                                id: cbPartyMode
+                                Layout.fillWidth: true
+                                model: partyModes
+                                onActivated: setPartyMode(currentIndex)
+                            }
+                            Switch {
+                                id: swParty
+                                onToggled: setParty(checked)
+                            }
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Button {
+                            text: "Clear graph"
+                            Layout.fillWidth: true
+                            onClicked: {
+                                graph.pitchPts = []
+                                graph.rollPts = []
+                                graph.requestPaint()
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ================= SETTINGS =================
+            ScrollView {
+                id: setScroll
+                clip: true
+                contentWidth: availableWidth
+
+                ColumnLayout {
+                    width: setScroll.availableWidth
+                    spacing: 8
+
+                    Text { text: "MOUNT"; color: "#9a9a9a"; font.pixelSize: 11; font.bold: true; font.letterSpacing: 1 }
+                    Text {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        color: setupReady ? okColor : warnColor
+                        font.pixelSize: 13
+                        text: !settingsLive ? "Waiting for live Express data..." :
+                              setupState < 0 ? "Update the Express package to use IMU setup here." :
+                              setupState === 1 ? "Waiting for current controller status. Keep the bike stopped." :
+                              setupState === 2 ? "Disarm CU Wheelie before changing IMU setup." :
+                              setupState === 3 ? "Stop the bike before changing IMU setup." :
+                              setupState === 4 ? "Leveling: hold the bike still..." :
+                              "Ready. Save the mounting axes, then Zero Level with the bike level and still."
+                    }
+                    GridLayout {
+                        Layout.fillWidth: true
+                        columns: 2
+                        columnSpacing: 10
+                        rowSpacing: 6
+
+                        Lbl { text: "Sensor axis pointing forward" }
+                        ComboBox { id: cbFwd; Layout.fillWidth: true; model: axisNames; currentIndex: 0; enabled: setupReady }
+
+                        Lbl { text: "Sensor axis pointing up" }
+                        ComboBox { id: cbUp; Layout.fillWidth: true; model: axisNames; currentIndex: 4; enabled: setupReady }
+                    }
+                    Text {
+                        id: offsetsText
+                        Layout.fillWidth: true
+                        color: "#9a9a9a"
+                        font.pixelSize: 11
+                        text: ""
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        color: "#9a9a9a"
+                        font.pixelSize: 11
+                        text: "Nose up should read + pitch and lean right + roll. Changing the axes clears " +
+                              "the Zero Level: redo it with the bike level and still."
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        color: mountDirty ? warnColor : textColorDim
+                        font.pixelSize: 12
+                        text: !confLoaded ? "Mount not loaded" :
+                              "Saved on Express: forward " + axisNames[devFwd] + ", up " + axisNames[devUp] +
+                              (mountDirty ? " — selection not saved" : "")
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Button { text: "Save mount"; Layout.fillWidth: true; enabled: setupReady && mountValid; onClicked: saveMount() }
+                        Button { text: rtCalBusy ? "Leveling..." : "Zero Level"; Layout.fillWidth: true; enabled: setupReady && !mountDirty && imuOk; onClicked: sendCmd(3) }
+                    }
+
+                    Text { text: "TAIL LIGHT"; color: "#9a9a9a"; font.pixelSize: 11; font.bold: true; font.letterSpacing: 1; Layout.topMargin: 6 }
+                    Text {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        color: "#9a9a9a"
+                        font.pixelSize: 11
+                        text: "Changes here apply and save right away."
+                    }
+                    GridLayout {
+                        Layout.fillWidth: true
+                        columns: 2
+                        columnSpacing: 10
+                        rowSpacing: 6
+
+                        Lbl { text: "Tail light on" }
+                        Switch { id: cbTl; checked: true; onToggled: liveWrite.restart() }
+
+                        Lbl { text: "LED count" }
+                        SpinBox { id: sbTlCount; from: 1; to: 120; value: 15; Layout.fillWidth: true; onValueModified: liveWrite.restart() }
+
+                        Lbl { text: "LED type" }
+                        ComboBox {
+                            id: cbTlType
+                            Layout.fillWidth: true
+                            model: ["GRB (WS2812)", "RGB", "GRBW (SK6812)", "RGBW type 3", "RGBW type 4"]
+                            currentIndex: 2
+                            onActivated: liveWrite.restart()
+                        }
+
+                        Lbl { text: "Running light\n" + (slTlRun.value * 100).toFixed(0) + "%" }
+                        Slider { id: slTlRun; from: 0; to: 0.6; stepSize: 0.01; value: 0.15; Layout.fillWidth: true
+                                 onPressedChanged: if (!pressed) liveWrite.restart() }
+
+                        Lbl { text: "Brake light\n" + (slTlBrk.value * 100).toFixed(0) + "%" }
+                        Slider { id: slTlBrk; from: 0.05; to: 0.6; stepSize: 0.01; value: 0.4; Layout.fillWidth: true
+                                 onPressedChanged: if (!pressed) { liveWrite.restart(); preview(1, 3) } }
+
+                        Lbl { text: "Party brightness\n" + (slTlParty.value * 100).toFixed(0) + "%" }
+                        Slider { id: slTlParty; from: 0.05; to: 0.6; stepSize: 0.01; value: 0.25; Layout.fillWidth: true
+                                 onPressedChanged: if (!pressed) liveWrite.restart() }
+
+                        Lbl { text: "Party speed\n" + slTlSpeed.value.toFixed(2) + "x" }
+                        Slider { id: slTlSpeed; from: 0.25; to: 2.5; stepSize: 0.05; value: 1.0; Layout.fillWidth: true
+                                 onPressedChanged: if (!pressed) liveWrite.restart() }
+
+                        Lbl { text: "Dim when board above\n" + slTlTemp.value.toFixed(0) + "°C" +
+                                    (chipTemp > -50 ? ("  (now " + chipTemp.toFixed(0) + "°C)") : "") }
+                        Slider { id: slTlTemp; from: 60; to: 100; stepSize: 1; value: 80; Layout.fillWidth: true
+                                 onPressedChanged: if (!pressed) liveWrite.restart() }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Button { text: "Preview brake"; Layout.fillWidth: true; onClicked: preview(1, 3) }
+                        Button { text: "Preview hazard"; Layout.fillWidth: true; onClicked: preview(2, 3) }
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        color: "#9a9a9a"
+                        font.pixelSize: 11
+                        text: "Brake and hazard come from CU Wheelie and override party mode. " +
+                              "Keep brightness modest: the strip shares the VESC's 5 V."
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Layout.topMargin: 6
+                        Text { text: "IMU FILTER (ADVANCED)"; color: "#9a9a9a"; font.pixelSize: 11; font.bold: true; font.letterSpacing: 1; Layout.fillWidth: true }
+                        Switch { id: swAdv; checked: false }
+                    }
+                    GridLayout {
+                        visible: swAdv.checked
+                        Layout.fillWidth: true
+                        columns: 2
+                        columnSpacing: 10
+                        rowSpacing: 6
+
+                        Lbl { text: "Filter coefficient\n" + slAlpha.value.toFixed(3) }
+                        Slider { id: slAlpha; from: 0.9; to: 0.995; stepSize: 0.001; value: 0.98; Layout.fillWidth: true }
+
+                        Lbl { text: "Accel gate (g)\n" + slGate.value.toFixed(2) }
+                        Slider { id: slGate; from: 0.1; to: 1.0; stepSize: 0.01; value: 0.3; Layout.fillWidth: true }
+                    }
+                    Text {
+                        visible: swAdv.checked
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        color: "#9a9a9a"
+                        font.pixelSize: 11
+                        text: "Leave these unless you're tuning the IMU. Press Write & Save after changing them."
+                    }
+
+                    GridLayout {
+                        Layout.fillWidth: true
+                        columns: 3
+                        columnSpacing: 8
+                        Button { text: "Read"; Layout.fillWidth: true; onClicked: sendCmd(1) }
+                        Button { text: "Write && Save"; Layout.fillWidth: true; enabled: setupReady && mountValid; onClicked: writeConfig() }
+                        Button { text: "Restart IMU"; Layout.fillWidth: true; enabled: setupReady; onClicked: sendCmd(4) }
+                    }
+                }
+            }
+        }
+
+        Text {
+            Layout.fillWidth: true
+            text: statusText
+            color: textColor
+            font.pixelSize: 12
+            wrapMode: Text.WordWrap
+        }
+    }
+}

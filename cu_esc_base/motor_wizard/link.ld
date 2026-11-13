@@ -1,0 +1,58 @@
+MEMORY
+{
+    MEM : org = 0, len = 96k
+}
+
+SECTIONS
+{
+    . = 0;
+    _text = .;
+    
+    .program_ptr : ALIGN(4)
+    {
+        . = ALIGN(4);
+        *(.program_ptr)
+    } > MEM
+
+    .init_fun : ALIGN(4)
+    {
+    	. = ALIGN(4);
+        *(.init_fun)
+    } > MEM
+
+    .data : ALIGN(4)
+    {
+        . = ALIGN(4);
+        *(.data)
+    } > MEM
+
+    .unrelocated : ALIGN(4)
+    {
+        *(.data.rel*)
+    } > MEM
+    
+    .bss : ALIGN(4)
+    {
+        . = ALIGN(4);
+        *(.bss)
+    } > MEM
+    
+    .got : ALIGN(4)
+    {
+        . = ALIGN(4);
+        *(.got*)
+        . = ALIGN(4);
+    } > MEM
+    
+    .text : ALIGN(16) SUBALIGN(16)
+    {
+        *(.text)
+        *(.rodata)
+        *(.rodata.*)
+    } > MEM
+}
+
+
+/* Raw VESC libraries have no dynamic linker to relocate a GOT. */
+ASSERT(SIZEOF(.got) == 0, "Unresolved native GOT: compile with hidden visibility")
+ASSERT(SIZEOF(.unrelocated) == 0, "Static native pointers require relocation: use PC-relative code")

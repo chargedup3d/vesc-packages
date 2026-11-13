@@ -1,0 +1,18 @@
+@const-start
+(def bms-n 0)          (def bms-cells nil)
+(def bms-i 0.0)        (def bms-ah 0.0)     (def bms-ahfull 0.0)
+(def bms-tmax 0.0)     (def bms-tmin 0.0)
+(def bms-charging false)
+(def bms-v 0.0)        (def bms-soc 0.0)
+(def bms-last 0)
+(def e2-last nil)
+(defun e2-live () (and e2-last (< (secs-since e2-last) 2.0)))
+(def cfg-ab-en false)
+(def cfg-ab-mac "")
+(def cfg-ab-period 5.0)
+(def bl-night-on false)
+(def btn-debug false)
+(def touch-ok false)
+(def build-id "v2.13.0-motor-wizard5")
+(def layout-ver 13)
+@const-end

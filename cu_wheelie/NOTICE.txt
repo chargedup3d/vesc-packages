@@ -1,0 +1,15 @@
+Copyright 2026 Jeremy Maddox
+
+Charged Up's original code and modifications are licensed under the GNU
+General Public License, version 3 or (at your option) any later version.
+See LICENSE.txt for the full terms. Existing third-party code retains its
+original copyright and license notices.
+
+Based on Wheelie Assist 1.0.0 by 3ShulMotors (GPL-3.0).
+https://3shulmotors.com
+
+Charged Up adds external IMU support, source selection, connection handling
+and the Charged Up interface.
+
+The VESC native interface header, vesc_c_if.h, is Copyright 2022 Benjamin
+Vedder and licensed under GPL-3.0-or-later. Its original notice is retained.

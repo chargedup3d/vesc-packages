@@ -1,0 +1,35 @@
+CU Dash font notices
+
+These fonts are distributed under their own licenses, separately from the
+GPL license covering the package code. The full license texts are in
+font/licenses/ and are included in the built package description.
+
+Montserrat-Medium.ttf
+  Montserrat by The Montserrat Project Authors.
+  Copyright 2011 The Montserrat Project Authors
+  (https://github.com/JulietaUla/Montserrat), as recorded in this font.
+  The upstream v9.000 license also carries:
+  Copyright 2024 The Montserrat.Git Project Authors
+  (https://github.com/JulietaUla/Montserrat.git).
+  License: SIL Open Font License 1.1; font/licenses/Montserrat-OFL.txt.
+  Modified for this package: glyph subset and Medium weight instance.
+  Source: https://github.com/JulietaUla/Montserrat
+  License source: https://github.com/google/fonts/blob/76fca9fd0bb4ea46583f92e978660f3984ab9442/ofl/montserrat/OFL.txt
+
+Rajdhani-Bold.ttf
+  Rajdhani by Indian Type Foundry.
+  Copyright (c) 2014, Indian Type Foundry (info@indiantypefoundry.com).
+  License: SIL Open Font License 1.1; font/licenses/Rajdhani-OFL.txt.
+  Modified for this package: glyph subset of Rajdhani Bold.
+  Source: https://github.com/itfoundry/rajdhani
+  License source: https://github.com/google/fonts/blob/main/ofl/rajdhani/OFL.txt
+
+Icons.ttf
+  Material Symbols by Google.
+  License: Apache License 2.0; font/licenses/Material-Symbols-Apache-2.0.txt.
+  Modified for this package: glyph subset, stored as Icons.ttf.
+  Source: https://github.com/google/material-design-icons
+  License source: https://github.com/google/material-design-icons/blob/master/LICENSE
+
+These notices acknowledge the original authors; they do not imply endorsement
+of Charged Up products.

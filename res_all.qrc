@@ -1,0 +1,11 @@
+<RCC>
+  <qresource prefix="/vesc_packages">
+    <file>cu_express_link/cu_express_link.vescpkg</file>
+    <file>cu_esc_base/cu_esc_base.vescpkg</file>
+    <file>cu_dash/cu_dash.vescpkg</file>
+    <file>cu_wheelie/cu_wheelie.vescpkg</file>
+    <file>cu_imu/cu_imu.vescpkg</file>
+    <file>cu_io/cu_io.vescpkg</file>
+    <file>cu_link/cu_link.vescpkg</file>
+  </qresource>
+</RCC>

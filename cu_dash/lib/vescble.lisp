@@ -1,0 +1,636 @@
+(def cfg-vb-en false)
+(def cfg-vb-mac "")
+(def vb-h-write -1)
+(def vb-h-notify -1)
+(def vb-buf nil)
+(def vb-len 0)
+(def vb-frames 0)
+(def vb-resync 0)
+(def vb-bad-crc 0)
+(def vb-tmp nil)
+(def vb-rx-ts 0)
+(def vb-last 0)
+(def vb-state "off")
+(def vb-dump false)
+(def vb-running false)
+(def vb-cmd 47)
+(def vb-poll-hz 10.0)
+(def vb-fwd -1)
+(def vb-can-ids nil)
+(def vb-pinged false)
+(def vb-try-t 0)
+(def vb-drop-t nil)
+(def vb-rest-w 5.0)
+(defun vb-drop ()
+(if (> (car (cdr (trap (ble-state)))) 1) {
+(trap (ble-disconnect))
+(def vb-drop-t (systime))
+}))
+(defun vb-send (payload) (if (< vb-fwd 0) (vb-send-raw payload) {
+(var n (buflen payload))
+(var w (bufcreate (+ n 2)))
+(bufset-u8 w 0 34)
+(bufset-u8 w 1 vb-fwd)
+(bufcpy w 2 payload 0 n)
+(var ok (vb-send-raw w))
+(free w)
+ok
+}))
+(defun vb-send-raw (payload) {
+(var n (buflen payload))
+(var head (if (<= n 255) 2 3))
+(var b (bufcreate (+ n head 3)))
+(bufset-u8 b 0 head)
+(if (= head 2) (bufset-u8 b 1 n) (bufset-u16 b 1 n))
+(bufcpy b head payload 0 n)
+(bufset-u16 b (+ n head) (crc16 payload n))
+(bufset-u8 b (+ n head 2) 3)
+(var total (+ n head 3))
+(var off 0)
+(var ok true)
+(atomic
+(loopwhile (< off total) {
+(var len (if (> (- total off) 20) 20 (- total off)))
+(var part (bufcreate len))
+(bufcpy part 0 b off len)
+(var r (trap (ble-write vb-h-write part)))
+(free part)
+(if (not (and (eq (car r) 'exit-ok) (eq (ix r 1) t))) (setq ok false))
+(setq off (+ off len))
+}))
+(free b)
+ok
+})
+(defun link-data-live () (< (secs-since link-on-t) 2.0))
+(defun vb-poll () {
+(var p (bufcreate 1))
+(bufset-u8 p 0 vb-cmd)
+(vb-send p)
+(free p)
+})
+(defun vb-i16 (b i) (bufget-i16 b i))
+(defun vb-i32 (b i) (bufget-i32 b i))
+(def esc-mode-ts 0)
+(def esc-suspend false)
+(def esc-motor-bad false)
+(def esc-seen 0)
+(def esc-back 0)
+(def esc-ever false)
+(def esc-sync false)
+(def esc-mode-raw -9)
+(defun esc-present () (or esc-ever (< (secs-since esc-seen) 5.0)))
+(defun esc-status (mode susp mbad) {
+(if (> (secs-since esc-seen) 3.0) { (def esc-sync false) (def esc-back (systime)) })
+(def esc-seen (systime))
+(def esc-ever true)
+(def esc-mode-raw mode)
+(def esc-suspend (= susp 1))
+(def esc-motor-bad (= mbad 1))
+(var m (- mode 1))
+(if (= m cfg-mode) (def esc-sync true))
+(if (and (= cfg-mode 4) (!= m 4) (not kid-on)
+(> (secs-since esc-mode-ts) 2.0) (> (secs-since esc-back) 2.0)) {
+(if (send-mode 1) {
+(print "road mode: not on this controller")
+(eeprom-store-i 64 1)
+})
+})
+(if (and esc-sync (!= m cfg-mode)
+(not (and kid-on (= cfg-mode 4)))
+(> (secs-since esc-mode-ts) 2.0)
+(>= m -1) (<= m 3)) {
+(def cfg-mode m)
+(def mode-state (cons m (if mode-state (cdr mode-state) 0)))
+})
+})
+(defun vb-frame (p) (if (< (buflen p) 2) nil {
+(setup-from-ble p) (hall-from-ble p) (pm-receive p 1 2)
+(if (and (= (bufget-u8 p 1) 25) (>= (buflen p) 6))
+(esc-status (bufget-u8 p 3) (bufget-u8 p 4) (bufget-u8 p 5)))
+(if (and (= (bufget-u8 p 1) 202) (>= (buflen p) 3)) {
+(def x-cruise (bufget-u8 p 2))
+(def x-cruise-t (systime))
+})
+(if (>= (buflen p) 4) (whl-from-ble p))
+}))
+(defun vb-parse (b) (if (< (buflen b) 56) nil {
+(if vb-dump {
+(def vb-dump false)
+(var s "VBRAW:")
+(looprange i 0 (buflen b)
+(setq s (str-merge s (str-from-n (bufget-u8 b i) "%02X"))))
+(print s)
+})
+(def d-tesc (/ (to-float (vb-i16 b 1)) 10.0))
+(def d-tmot (/ (to-float (vb-i16 b 3)) 10.0))
+(def d-amps (/ (to-float (vb-i32 b 5)) 100.0))
+(var i-in (/ (to-float (vb-i32 b 9)) 100.0))
+(def d-duty (/ (to-float (vb-i16 b 13)) 1000.0))
+(var ms (/ (to-float (vb-i32 b 19)) 1000.0))
+(def d-speed (* ms 3.6))
+(def d-volt (/ (to-float (bufget-u16 b 23)) 10.0))
+(def d-soc (/ (to-float (bufget-u16 b 25)) 1000.0))
+(def d-wh (/ (to-float (vb-i32 b 35)) 10000.0))
+(var tk (/ (to-float (vb-i32 b 43)) 1000000.0))
+(trip-in (if (< tk 0.0) 0.0 tk))
+(def d-fault (bufget-u8 b 55))
+(if (>= (buflen b) 66)
+(def d-odo (/ (to-float (bufget-u32 b 62)) 1000.0)))
+(def d-iin i-in)
+(def d-kw (* d-volt i-in 0.001))
+(if (not (bms-live)) (def d-tbat d-tesc))
+(def d-last (systime))
+(def d-online true)
+(if (not-eq vb-state "connected") (def vb-state "connected"))
+(def vb-frames (+ vb-frames 1))
+(if (< vb-last vb-up) (def vb-first (systime)))
+(def vb-last (systime))
+(def vb-backoff 0)
+(if vb-mode-pending
+(cond ((or (esc-present) (link-carries)) (def vb-mode-pending false))
+((> (secs-since vb-first) 5.0) {
+(def vb-mode-pending false)
+(trap (vb-mode-apply cfg-mode))
+})
+(t nil)))
+true
+}))
+(defun vb-dispatch (p) {
+(if (and gw-ble-sent (gw-ble-reply p)) nil {
+(var c (bufget-u8 p 0))
+(cond
+((= c vb-cmd) (trap (vb-parse p)))
+((= c 36) (trap (vb-frame p)))
+((= c 62) (vb-can-list p)))
+})
+})
+(defun vb-can-list (p) {
+(var ids nil)
+(looprange i 1 (buflen p) (setq ids (cons (bufget-u8 p i) ids)))
+(setq ids (reverse ids))
+(def vb-can-ids (append (filter (fn (x) (= x cfg-esc-id)) ids)
+(filter (fn (x) (!= x cfg-esc-id)) ids)))
+(if (eq vb-can-ids nil) (def vb-state "nothing on CAN"))
+})
+(defun vb-ping () {
+(var p (bufcreate 1))
+(bufset-u8 p 0 62)
+(vb-send-raw p)
+(free p)
+})
+(defun vb-silent () {
+(var s (secs-since vb-try-t))
+(cond
+((< s 1.5) nil)
+((not vb-pinged) {
+(def vb-pinged true)
+(def vb-fwd -1)
+(def vb-can-ids nil)
+(def vb-state "looking on CAN")
+(def vb-try-t (systime))
+(vb-ping)
+})
+((and vb-can-ids (or (< vb-fwd 0) (> s 2.5))) {
+(def vb-fwd (car vb-can-ids))
+(def vb-can-ids (cdr vb-can-ids))
+(def vb-state (str-merge "asking CAN id " (str-from-n vb-fwd "%d")))
+(def vb-try-t (systime))
+})
+((> s (if (>= vb-fwd 0) 2.5 5.0)) {
+(def vb-state "no data - not a controller?")
+(def vb-fwd -1)
+(vb-drop)
+(def vb-linked false)
+(def vb-min-w 15)
+(vb-wait)
+})
+(t nil))
+})
+(defun vb-whole (c cn) {
+(var plen (- cn 5))
+(if (and (> plen 0) (= (bufget-u8 c 0) 2) (= (bufget-u8 c 1) plen)
+(= (bufget-u8 c (- cn 1)) 3)) {
+(var p (bufcreate plen))
+(bufcpy p 0 c 2 plen)
+(var ok (= (crc16 p plen) (bufget-u16 c (+ plen 2))))
+(if ok (vb-dispatch p))
+(free p)
+ok
+} false)
+})
+(defun vb-feed (chunk)
+(if (and (> vb-len 0) (vb-whole chunk (buflen chunk)))
+(def vb-rx-ts (systime))
+(vb-feed-buf chunk)))
+(defun vb-feed-buf (chunk) {
+(var cn (buflen chunk))
+(if (> (+ vb-len cn) 1024) (def vb-len 0))
+(var off (if (and (> vb-len 0) (> (secs-since vb-rx-ts) 0.25)) 1 0))
+(def vb-rx-ts (systime))
+(bufcpy vb-buf vb-len chunk 0 cn)
+(def vb-len (+ vb-len cn))
+(var more true)
+(loopwhile (and more (< off vb-len)) {
+(var s0 (bufget-u8 vb-buf off))
+(var hdr (if (= s0 2) 2 3))
+(var avail (- vb-len off))
+(cond
+((and (not-eq s0 2) (not-eq s0 3)) {
+(def vb-resync (+ vb-resync 1))
+(setq off (+ off 1))
+})
+((< avail hdr) (setq more false))
+(t {
+(var plen (if (= s0 2) (bufget-u8 vb-buf (+ off 1))
+(bufget-u16 vb-buf (+ off 1))))
+(var total (+ hdr plen 3))
+(cond
+((or (= plen 0) (> total 518)) {
+(def vb-resync (+ vb-resync 1))
+(setq off (+ off 1))
+})
+((< avail total) (setq more false))
+((not-eq (bufget-u8 vb-buf (+ off total -1)) 3) {
+(def vb-resync (+ vb-resync 1))
+(setq off (+ off 1))
+})
+(t {
+(var p (bufcreate plen))
+(bufcpy p 0 vb-buf (+ off hdr) plen)
+(if (= (crc16 p plen)
+(bufget-u16 vb-buf (+ off hdr plen))) {
+(vb-dispatch p)
+(setq off (+ off total))
+} {
+(def vb-bad-crc (+ vb-bad-crc 1))
+(setq off (+ off 1))
+})
+(free p)
+}))
+}))
+})
+(if (> off 0) {
+(var left (- vb-len off))
+(if (> left 0) {
+(bufcpy vb-tmp 0 vb-buf off left)
+(bufcpy vb-buf 0 vb-tmp 0 left)
+})
+(def vb-len left)
+})
+})
+(defun vb-has (u s)
+(if (eq (type-of u) type-array)
+(not-eq (str-find u s) -1)
+false))
+(defun vb-find () {
+(def vb-h-write -1)
+(def vb-h-notify -1)
+(loopforeach c (ble-chars) {
+(var u (ix c 0))
+(if (vb-has u "6E400002") (def vb-h-write (ix c 1)))
+(if (vb-has u "6E400003") (def vb-h-notify (ix c 1)))
+})
+(var ok (and (>= vb-h-write 0) (>= vb-h-notify 0)))
+(if (not-eq ok vb-had-uart) {
+(def vb-had-uart ok)
+(print (list "uart handles: write" vb-h-write "notify" vb-h-notify))
+})
+ok
+})
+(defun vb-seen () {
+(if (< (str-len cfg-vb-mac) 17) false {
+(var f false)
+(loopforeach d (car (cdr (trap (ble-scan-list))))
+(if (eq (str-find (ix d 0) cfg-vb-mac) 0) (setq f true)))
+f
+})
+})
+(defun ble-link-busy (li)
+(match (trap (ble-state li))
+((exit-ok (? s)) (or (= s 2) (= s 3)))
+(_ false)))
+(defun ble-wait-other (li) {
+(var n 0)
+(loopwhile (and (< n 28) (ble-link-busy li)) {
+(sleep 0.4)
+(setq n (+ n 1))
+})
+})
+(defun vb-link () {
+(if (< (str-len cfg-vb-mac) 17) {
+(def vb-state "no controller chosen")
+false
+} {
+(var watch (and (> vb-backoff 0) (vb-gentle true)))
+(def vb-state (if watch "watching for controller" "scanning"))
+(def vb-refused false)
+(vb-drop)
+(trap (ble-scan-start 5))
+(var n 0)
+(var found false)
+(loopwhile (and (not found) (< n (if watch 13 14))) {
+(sleep 0.4)
+(setq found (vb-seen))
+(setq n (+ n 1))
+})
+(trap (ble-scan-stop))
+(if watch (vb-gentle nil))
+(sleep 0.3)
+(if (not (vb-seen)) {
+(def vb-state "not advertising")
+false
+} (if (vb-is-display (vb-seen-name)) {
+(def vb-state "saved device is a display")
+(def vb-wrong true)
+false
+} {
+(def vb-state "connecting")
+(ble-wait-other 1)
+(def vb-try (systime))
+(trap (ble-connect cfg-vb-mac))
+(if (not-eq (car (cdr (trap (ble-state)))) 4) {
+(def vb-state "connect failed")
+(def vb-refused true)
+(def vb-fails (+ vb-fails 1))
+(if (>= vb-fails 3) (def vb-nocon true))
+false
+} {
+(sleep 1.0)
+(if (not (vb-find)) {
+(def vb-state "not a controller")
+(def vb-wrong true)
+false
+} {
+(trap (ble-notify vb-h-notify))
+(sleep 0.5)
+(trap (ble-cccd vb-h-notify))
+(sleep 0.5)
+(def vb-len 0)
+(def vb-linked true) (def vb-stale false)
+(def vb-up (systime))
+(def vb-pinged false)
+(def vb-try-t (systime))
+(def vb-wrong false)
+(def vb-nocon false)
+(def vb-fails 0)
+(def vb-mode-pending true)
+(def vb-state "connected")
+true
+})
+})
+}))
+})
+})
+(def vb-linked false)
+(def vb-stale false)
+(def vb-backoff 0)
+(defun vb-phone () (eq (car (cdr (trap (connected-ble)))) t))
+(def vb-gentle-ok nil)
+(defun vb-gentle (on) {
+(var ok (eq (car (trap (ble-scan-gentle on))) 'exit-ok))
+(if on (def vb-gentle-ok ok))
+ok
+})
+(def vb-refused false)
+(def vb-min-w 0)
+(defun vb-wait () {
+(def vb-backoff (if (< vb-backoff 5) 5
+(if vb-gentle-ok 3
+(if (> (* vb-backoff 2) 60) 60 (* vb-backoff 2)))))
+(var w (if (and vb-refused (>= vb-fails 3))
+(if (>= vb-fails 6) 300 (* 60 (shl 1 (- vb-fails 3))))
+vb-backoff))
+(if (< w vb-min-w) (setq w vb-min-w))
+(def vb-min-w 0)
+(var p0 vb-pick)
+(var t0 (systime))
+(loopwhile (and (< (secs-since t0) w) cfg-vb-en (not vb-paused) (not (vb-held))
+(= vb-pick p0))
+(sleep 0.5))
+})
+(defun vb-is-display (name)
+(and (eq (type-of name) type-array)
+(or (eq (str-find name "CUP-") 0)
+(eq name (car (cdr (trap (conf-get 'ble-name))))))))
+(defun vb-seen-name () {
+(var nm nil)
+(loopforeach d (car (cdr (trap (ble-scan-list))))
+(if (eq (str-find (ix d 0) cfg-vb-mac) 0) (setq nm (ix d 1))))
+nm
+})
+(def vb-up 0)
+(def vb-first 0)
+(def vb-try 0)
+(def vb-wrong false)
+(def vb-had-uart false)
+(def vb-mode-pending false)
+(def vb-paused false)
+(def vb-t0 0)
+(defun vb-standby () (and (link-carries) (> (secs-since link-on-t0) 3.0)
+(not (and setup-owner (= (ix setup-owner 0) 2)))))
+(defun vb-grace () (and link-saved (< (secs-since vb-t0) 8.0)))
+(defun vb-held () (or (vb-standby) (vb-grace)))
+(defun vb-off () {
+(if (= (car (cdr (trap (ble-state)))) 4) (vb-drop))
+(def vb-linked false)
+(def vb-state "off")
+})
+(def vb-nocon false)
+(def vb-fails 0)
+(def vb-thread false)
+(defun vb-start () {
+(if vb-thread (print "vesc ble already running") {
+(if (not (eq (car (trap (ble-state))) 'exit-ok)) {
+(def vb-state "no ble central in firmware")
+false
+} {
+(def vb-buf (bufcreate 1024))
+(def vb-tmp (bufcreate 1024))
+(def vb-t0 (systime))
+(loopwhile-thd ("EscBeat" 120) t {
+(match (trap (loopwhile t {
+(if (and cfg-vb-en vb-linked (not (link-carries)))
+(vb-mode-frame cfg-mode))
+(sleep (/ 1.0 esc-beat-hz))
+}))
+((exit-ok (? a)) nil) (_ (print "esc beat crashed")))
+(sleep 1.0)
+})
+(loopwhile-thd ("Vesc" 200) t {
+(match (trap (loopwhile t {
+(if (and cfg-vb-en (not vb-paused) (not (vb-held))) {
+(if (or (not vb-linked) vb-stale
+(!= (car (cdr (trap (ble-state)))) 4))
+(if (vb-phone) {
+(def vb-state "waiting - VESC Tool connected")
+(def vb-backoff 0)
+(sleep 0.5)
+} {
+(if vb-linked {
+(def vb-linked false)
+(def vb-stale false)
+(def vb-state "link lost")
+(def vb-drop-t (systime))
+(def vb-rest-w 15.0)
+})
+(var mac0 cfg-vb-mac)
+(loopwhile (and vb-drop-t (< (secs-since vb-drop-t) vb-rest-w)
+cfg-vb-en (eq cfg-vb-mac mac0)
+(not vb-paused) (not (vb-held)))
+(sleep 0.5))
+(def vb-rest-w 5.0)
+(if (not (vb-link)) (vb-wait))
+}))
+(if (= (car (cdr (trap (ble-state)))) 4) {
+(var t0 (systime))
+(var got vb-frames)
+(if gw-ble-busy (gw-ble-poll) { (vb-poll) (whl-keep) })
+(loopwhile (and (or gw-ble-busy (= got vb-frames))
+(< (secs-since t0) 0.15)) {
+(var f (car (cdr (trap (ble-rx)))))
+(if f (vb-feed f) (sleep 0.005))
+})
+(var idle-s (- (/ 1.0 vb-poll-hz)
+(secs-since t0) 0.04))
+(if (> idle-s 0.0) (sleep idle-s))
+})
+(if (> (secs-since vb-last) 2.0) {
+(def d-online (link-data-live))
+(if (eq vb-state "connected")
+(def vb-state "link lost"))
+(if (not vb-linked) nil
+(if (< vb-last vb-up)
+(vb-silent)
+(if (and (> (secs-since vb-last) 6.0) (not vb-stale)) {
+(vb-drop)
+(def vb-stale true)
+})))
+})
+} {
+(cond
+(vb-paused {
+(if (= (car (cdr (trap (ble-state)))) 4)
+(vb-drop))
+(def vb-linked false)
+(def d-online (link-data-live))
+(if (not-eq vb-state "released")
+(def vb-state "released"))
+})
+(cfg-vb-en {
+(if (= (car (cdr (trap (ble-state)))) 4)
+(vb-drop))
+(def vb-linked false)
+(def vb-backoff 0)
+(if (not-eq vb-state "standby - link")
+(def vb-state "standby - link"))
+})
+(t (vb-off)))
+(def d-online (link-data-live))
+(sleep 1.0)
+})
+(sleep 0.04)
+}))
+((exit-ok (? a)) nil)
+(_ (print "vesc ble thread restarted")))
+(sleep 1.0)
+})
+(def vb-state "running")
+(def vb-thread true)
+(def vb-running true)
+(def vb-linked false)
+true
+})
+})
+})
+(defun vb-list () {
+(vb-drop)
+(sleep 0.5)
+(trap (ble-scan-start 5))
+(spawn (fn () {
+(sleep 5.5)
+(trap (ble-scan-stop))
+(var s "VBLIST:")
+(loopforeach d (car (cdr (trap (ble-scan-list))))
+(setq s (str-merge s (ix d 0) "," (ix d 1) ","
+(str-from-n (ix d 2) "%d") ";")))
+(print s)
+}))
+true
+})
+(def vb-pick 0)
+(defun vb-use (mac) {
+(var old cfg-vb-mac)
+(def vb-pick (+ vb-pick 1))
+(def cfg-vb-mac mac)
+(def esc-ever false)
+(def vb-fwd -1)
+(def vb-paused false)
+(def vb-wrong false)
+(def vb-had-uart false)
+(def vb-nocon false)
+(def vb-fails 0)
+(def cfg-vb-en true)
+(eeprom-store-i 109 1)
+(vb-mac-save)
+(vb-drop)
+(if (not (eq old mac)) (def vb-drop-t nil))
+(sleep 0.5)
+(if vb-thread true (vb-start))
+true
+})
+(defun vb-hex (c)
+(cond ((and (>= c 48) (<= c 57)) (- c 48))
+((and (>= c 65) (<= c 70)) (- c 55))
+((and (>= c 97) (<= c 102)) (- c 87))
+(t 0)))
+(defun vb-mac-bytes (s) {
+(var o (bufcreate 6))
+(if (< (str-len s) 17) nil {
+(looprange i 0 6
+(bufset-u8 o i (+ (* 16 (vb-hex (bufget-u8 s (* i 3))))
+(vb-hex (bufget-u8 s (+ (* i 3) 1))))))
+o
+})
+})
+(defun vb-mac-save () {
+(var b (vb-mac-bytes cfg-vb-mac))
+(if b {
+(eeprom-store-i 110 (bufget-u32 b 0))
+(eeprom-store-i 111 (bufget-u16 b 4))
+(free b)
+true
+} false)
+})
+(defun vb-mac-load () {
+(var hi (eeprom-read-i 110))
+(var lo (eeprom-read-i 111))
+(if (or (eq hi nil) (= hi 0) (= hi -1)) false {
+(var b (bufcreate 6))
+(bufset-u32 b 0 hi)
+(bufset-u16 b 4 lo)
+(var s "")
+(looprange i 0 6 {
+(setq s (str-merge s (str-from-n (bufget-u8 b i) "%02X")))
+(if (< i 5) (setq s (str-merge s ":")))
+})
+(free b)
+(def cfg-vb-mac s)
+true
+})
+})
+(defun vb-raw () { (def vb-dump true) true })
+(defun vb-info () (print (list "vesc-ble" vb-state "frames" vb-frames
+"ago" (secs-since vb-last)
+"resync" vb-resync "bad-crc" vb-bad-crc
+"w" vb-h-write "n" vb-h-notify
+"mac" cfg-vb-mac)))
+(defun vb-scan () {
+(trap (ble-scan-start 6))
+(spawn (fn () {
+(sleep 7.0)
+(loopforeach d (car (cdr (trap (ble-scan-list))))
+(print d))
+(print "scan done")
+}))
+true
+})
