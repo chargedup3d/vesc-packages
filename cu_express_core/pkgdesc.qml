@@ -1,11 +1,11 @@
 import QtQuick 2.15
 Item {
-    property string pkgName: "CU Express Link"
+    property string pkgName: "CU Express Core"
     property string pkgDescriptionMd: "README-gen.md"
     property string pkgLisp: "main.lisp"
     property string pkgQml: "ui.qml"
     property bool pkgQmlIsFullscreen: false
-    property string pkgOutput: "cu_express_link.vescpkg"
+    property string pkgOutput: "cu_express_core.vescpkg"
     function isCompatible(fwRxParams) {
         return fwRxParams.hwTypeStr().toLowerCase() === "custom module" &&
                fwRxParams.hw.toLowerCase() === "vesc express t" &&

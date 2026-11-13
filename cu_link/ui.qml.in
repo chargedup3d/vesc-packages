@@ -193,7 +193,7 @@ Item {
         width: parent.width
         spacing: 8
 
-        Label { text: "CU Express Core"; font.bold: true; font.pointSize: 12 }
+        Label { text: "CU Express Link"; font.bold: true; font.pointSize: 12 }
         Label { text: "Package version: {{VERSION}}" }
 
         Label { Layout.fillWidth: true; wrapMode: Text.WordWrap

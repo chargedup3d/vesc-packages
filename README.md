@@ -9,18 +9,18 @@ Get the [CUP-3.5 screen from Charged Up 3D](https://chargedup3d.com/products/bik
 
 | Package | Install on |
 | --- | --- |
-| [CU Express Link](cu_express_link/README.md) | Stock VESC Express T 7.00; CAN wired |
+| [CU Express Core](cu_express_core/README.md) | Stock VESC Express T 7.00; CAN wired |
 | [CU Core ESC](cu_esc_base/README.md) | VESC motor controller 7.00 |
 | [CU Dash](cu_dash/README.md) | CUP-3.5 with compatible Charged Up native firmware and enlarged Lisp partition |
 | [CU Wheelie](cu_wheelie/README.md) | VESC motor controller 7.00 plus supported controls and IMU |
 | [CU IMU](cu_imu/README.md) | Express IMU hardware and Charged Up Express IMU firmware |
 | [CU IO Link](cu_io/README.md) | CU IO Link hardware and matching Charged Up firmware |
-| [CU Express Core](cu_link/README.md) | Express T already running Charged Up firmware named CU Link |
+| [CU Express Link](cu_link/README.md) | Express T already running Charged Up firmware named CU Link |
 
 ## Where to start
 
-For an **Express T already wired to your bike**, install Express Link on the
-Express T, then find it from your CUP-3.5 screen. Express Link uses stock VESC
+For an **Express T already wired to your bike**, install Express Core on the
+Express T, then find it from your CUP-3.5 screen. Express Core uses stock VESC
 Express 7.00 firmware and a CAN connection to the controller.
 
 For **power modes and Motor Wizard**, install CU Core ESC on the motor controller.
@@ -32,8 +32,8 @@ CU IMU on the matching sensor board. CU Core ESC and CU Wheelie replace one
 another. CU Wheelie does not include CU Core ESC's mode editor or Motor Wizard.
 
 Dash updates a CUP-3.5 screen with Charged Up screen firmware and the enlarged
-Lisp partition already installed. Express Core, IO Link and CU IMU require
-their matching Charged Up firmware; use Express Link for a stock Express T.
+Lisp partition already installed. Express Link, IO Link and CU IMU require
+their matching Charged Up firmware; use Express Core for a stock Express T.
 
 CU Core ESC and CU Wheelie require controller firmware **7.00**. The screen can
 read standard VESC data from a Flipsky 75100 on **6.00 or 7.00** without either

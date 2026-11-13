@@ -1,6 +1,6 @@
 (import "version.lisp" 'cu-package-version-data)
 (read-eval-program cu-package-version-data)
-;! CU Express Core: the CUP-3.5 / CAN link for an Express T.
+;! CU Express Link: the CUP-3.5 / CAN link for an Express T.
 ; Existing CU Link firmware; no IO-hat pins or onboard IMU are assumed.
 (import "lib/cu_common/cu_gateway_wire.lisp" 'cu-gateway-wire)
 (read-eval-program cu-gateway-wire)
@@ -44,7 +44,7 @@
     (trap (lights-start))
     (if cfg-ant-en (trap (ant-start)))
     (core-start)
-    (print (str-merge "Express Core running, build " build-id))
+    (print (str-merge "Express Link running, build " build-id))
 })
 @const-end
 (def build-id "link-1.2.0-rc1")

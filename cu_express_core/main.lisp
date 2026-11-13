@@ -1,6 +1,6 @@
 (import "version.lisp" 'cu-package-version-data)
 (read-eval-program cu-package-version-data)
-; CU Express Link v1. Stock VESC Express T 7.00, CAN connection.
+; CU Express Core v1. Stock VESC Express T 7.00, CAN connection.
 (import "lib/cu_common/cu_gateway_wire.lisp" 'cu-gateway-wire)
 (read-eval-program cu-gateway-wire)
 (import "lib/cu_common/cu_gateway_can.lisp" 'cu-gateway-can)
@@ -119,7 +119,7 @@
     (def cfg-io-en false) (def cfg-walk-en false)
     (express-config-load)
     (core-start)
-    (print "CU Express Link v1 running")
+    (print "CU Express Core v1 running")
 })
 @const-end
 (def build-id "express-link-v1")

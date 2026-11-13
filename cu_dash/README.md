@@ -19,7 +19,7 @@ saved screen settings.
 
 Tap **Tap to find a controller** to open Detection and Setup. Connect directly
 over controller Bluetooth, or select a Charged Up link on the controller's CAN
-bus. Use Express Link for a stock Express T. CU Link, CU IO Link and Express
+bus. Use Express Core for a stock Express T. CU Link, CU IO Link and Express
 IMU boards use their matching packages.
 
 Standard VESC telemetry works without a controller package, including the

@@ -5,7 +5,7 @@ RCC ?= rcc
 CROSS_COMPILE ?= arm-none-eabi-
 export VESC_TOOL PYTHON CROSS_COMPILE
 
-PKGS = cu_express_link cu_esc_base cu_dash cu_wheelie cu_imu cu_io cu_link
+PKGS = cu_express_core cu_esc_base cu_dash cu_wheelie cu_imu cu_io cu_link
 
 all: vesc_pkg_all.rcc
 

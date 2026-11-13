@@ -1,4 +1,4 @@
-# CU Express Link
+# CU Express Core
 
 Connect a VESC Express T already wired to your bike's CAN bus to a Charged Up
 CUP-3.5 screen. This package runs on the Express T using stock firmware.
@@ -13,7 +13,7 @@ CUP-3.5 screen. This package runs on the Express T using stock firmware.
 ## Install and connect
 
 1. Connect VESC Tool to the Express T and confirm its hardware name.
-2. Back up any existing package, then install `cu_express_link.vescpkg` through
+2. Back up any existing package, then install `cu_express_core.vescpkg` through
    **VESC Packages**.
 3. Power-cycle the Express T. Leave automatic controller discovery on for a
    single-controller bike.
@@ -26,15 +26,15 @@ off and use **Forget paired screen**.
 
 ## Controller features
 
-Express Link carries controller telemetry, mode commands, kids limits,
+Express Core carries controller telemetry, mode commands, kids limits,
 Wheelie status and supported setup commands between the controller and screen.
 It can also carry telemetry from a compatible CAN BMS.
 
 CU Core ESC or CU Wheelie runs separately on the motor controller. That package
-provides its mode and setup features; Express Link supplies the connection.
+provides its mode and setup features; Express Core supplies the connection.
 Standard VESC telemetry is available without either controller package.
 
-Express Link does not add an IMU, light outputs, ANT reader or IO-hat controls.
+Express Core does not add an IMU, light outputs, ANT reader or IO-hat controls.
 
 ## Connection problems
 

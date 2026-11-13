@@ -4,7 +4,7 @@ Power modes and controller setup for a Charged Up screen or iOS app. Install
 CU Core ESC on the **motor controller**, running **VESC firmware 7.00**.
 
 CU Core ESC and CU Wheelie replace one another. For a stock Express T connected
-by CAN, install Express Link on the Express T as well.
+by CAN, install Express Core on the Express T as well.
 
 ## Install
 

@@ -12,7 +12,7 @@ Item {
     property double sentAt: 0
     property string queued: ""
     property string operation: ""
-    property string message: "Waiting for Express Link..."
+    property string message: "Waiting for Express Core..."
     property var pendingValues: []
     property bool saveAck: false
     property bool stale: true
@@ -75,7 +75,7 @@ Item {
             automatic.checked = v[1] === 1; esc.value = v[2]
             second.checked = v[3] === 1; esc2.value = v[4]; channel.value = v[5]
         }
-        if (first && !busy) message = "Connected to Express Link."
+        if (first && !busy) message = "Connected to Express Core."
     }
     Timer { interval: 250; repeat: true; running: true; onTriggered: tick() }
     Connections {
@@ -89,7 +89,7 @@ Item {
         ColumnLayout {
             width: parent.width
             spacing: 14
-            Label { text: "CU Express Link"; font.pointSize: 20; font.bold: true }
+            Label { text: "CU Express Core"; font.pointSize: 20; font.bold: true }
             Label { text: "Package version: {{VERSION}} • Stock Express T 7.00"; opacity: 0.7 }
             Label {
                 Layout.fillWidth: true; wrapMode: Text.WordWrap

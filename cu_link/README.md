@@ -1,10 +1,10 @@
-# CU Express Core
+# CU Express Link
 
 The screen-link package for an Express T running Charged Up Link firmware.
 The device must report **CU Link** in VESC Tool. For stock VESC Express T 7.00,
-use Express Link instead.
+use Express Core instead.
 
-Express Core connects a CUP-3.5 screen over ESP-NOW to the motor controller's
+Express Link connects a CUP-3.5 screen over ESP-NOW to the motor controller's
 CAN bus. CU Core ESC is a separate package on the motor controller.
 
 ## Features
