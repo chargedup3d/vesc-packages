@@ -74,3 +74,18 @@ changes.
 
 Motor Wizard presets follow [VESC Tool](https://github.com/vedderb/vesc_tool/blob/53dd253c9e3b60a38584d776d4dadcc14b51b0a4/mobile/SetupWizardFoc.qml).
 See `LICENSE.txt` for the GPLv3 license and retain the source attribution notices.
+
+## Build from source
+
+Requires Python 3.9+, Make and VESC Tool. Also install `arm-none-eabi-gcc`
+and `arm-none-eabi-objcopy` for the native helpers.
+Build from the root of the full repository so the shared `tools/` folder is
+included:
+
+```sh
+make -C cu_esc_base VESC_TOOL=/path/to/vesc_tool
+```
+
+Output: `cu_esc_base/cu_esc_base.vescpkg`. See the
+[build options](https://github.com/chargedup3d/vesc-packages#build-from-source)
+for tool paths, versioning and archive builds.

@@ -59,6 +59,20 @@ Tap the help button at the bottom right for common connection and setup question
 
 Font credits and license notices are in `FONT-NOTICES.txt`.
 
+## Build from source
+
+Requires Python 3.9+, Make and VESC Tool.
+Build from the root of the full repository so the shared `tools/` folder is
+included:
+
+```sh
+make -C cu_dash VESC_TOOL=/path/to/vesc_tool
+```
+
+Output: `cu_dash/cu_dash.vescpkg`. See the
+[build options](https://github.com/chargedup3d/vesc-packages#build-from-source)
+for tool paths, versioning and archive builds.
+
 ## License
 
 GPL-3.0-or-later. See `LICENSE.txt` and `NOTICE.txt` for terms and credits.

@@ -34,6 +34,20 @@ retries on the next startup.
 You may need to select the ANT battery again after updating. New ANT selections
 are saved.
 
+## Build from source
+
+Requires Python 3.9+, Make and VESC Tool.
+Build from the root of the full repository so the shared `tools/` folder is
+included:
+
+```sh
+make -C cu_link VESC_TOOL=/path/to/vesc_tool
+```
+
+Output: `cu_link/cu_link.vescpkg`. See the
+[build options](https://github.com/chargedup3d/vesc-packages#build-from-source)
+for tool paths, versioning and archive builds.
+
 ## License
 
 GPL-3.0-or-later. See `LICENSE.txt` and `NOTICE.txt` for terms and credits.

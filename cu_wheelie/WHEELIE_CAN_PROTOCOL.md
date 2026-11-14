@@ -1,7 +1,8 @@
 # Wheelie Assist display CAN protocol v1 (as used by CU Wheelie)
 
 > Originally by 3ShulMotors for Wheelie Assist. CU Wheelie keeps it
-> compatible and adds the flag bits and 25 Hz rate noted below.
+> compatible, including the six registers, packet layout and 100 ms SUB units.
+> CU extensions use additional command and response types.
 
 This document is the complete spec for talking to the **Wheelie Assist** controller
 (a LispBM script running on a 3ShulMotors / VESC-based motor controller) from a display.
@@ -103,9 +104,10 @@ Persists the current values to EEPROM (survives reboot). Controller replies with
 |------|------|------|------|-----|
 | Val  | 0x57 | 0x06 | rate | 0   |
 
-`rate`: telemetry period in units of 40 ms ticks. `0` = off, `1` = 25 Hz (default),
-`5` = 5 Hz, etc. (Telemetry is **on at 25 Hz by default**: you do not have to send this.
-CU IMU's tail light reads this frame, so leave it on.)
+`rate`: telemetry period in units of 100 ms. `0` = off, `1` = 10 Hz (default),
+`5` = 2 Hz. Telemetry starts enabled without a SUB request. CU IMU's tail light
+reads this frame, so leave it on. The Bluetooth live stream is separate and
+can run at 25 Hz.
 
 ---
 
@@ -113,7 +115,7 @@ CU IMU's tail light reads this frame, so leave it on.)
 
 Sent to ID `0x540 + canid`. Byte 0 = `0x57`, byte 1 = response type.
 
-### 0x81 — TELEMETRY  (broadcast, default 25 Hz)
+### 0x81 — TELEMETRY  (broadcast, default 10 Hz)
 | Byte | 0    | 1    | 2–3        | 4–5        | 6     | 7        |
 |------|------|------|------------|------------|-------|----------|
 | Val  | 0x57 | 0x81 | pitch i16  | rate i16   | flags | out i8   |
@@ -191,7 +193,7 @@ TX  0x500 : 57 04 00 00 00 00 00 00          ; SAVE
 RX  0x540 : 57 83 04 01 00 00 00 00          ; ACK save ok
 ```
 
-**Live wheelie angle (arrives automatically at 25 Hz)**
+**Live wheelie angle (arrives automatically at 10 Hz)**
 ```
 RX  0x540 : 57 81 01 5E 00 96 01 2D          ; pitch=35.0°, rate=15.0°/s, armed+? , out=0.45
             pitch  = 0x015E = 350  -> 35.0
@@ -217,4 +219,42 @@ RX  0x540 : 57 81 01 5E 00 96 01 2D          ; pitch=35.0°, rate=15.0°/s, arme
   `whl-sid-rsp` in `wheelie_limiter.lisp` and this document together.
 
 ---
-*3ShulMotors Wheelie Assist — CAN protocol v1*
+## 8. CU Power Modes extension
+
+CU Wheelie 1.1 shares CU Core ESC's mode table and mode-selection messages.
+These do not change commands `0x01`–`0x06` or add registers to READ_ALL.
+
+Power/speed requests use the same `0x500 + canid` address and eight-byte
+`0x57` frame. Replies use `0x540 + canid`. Direct Bluetooth custom app data
+uses the same eight bytes.
+
+| Byte | Request | Reply |
+| --- | --- | --- |
+| 0 | `0x57` | `0x57` |
+| 1 | `0x32` | `0xB0` |
+| 2 | Caller token | Echoed token |
+| 3 | Mode/field flags, plus `0x80` for write | Mode/field flags plus status |
+| 4–5 | Requested value, u16 BE | Actual value, u16 BE |
+| 6–7 | Expected current value, u16 BE | Protocol version `1`, reserved `0` |
+
+Mode bits 0–1 select forward Mode 1, 2 or 3 as `0`, `1`, `2`. Bit 2 selects
+speed; clear it for drive power. Power is in hundredths of a percent
+(`4321` = 43.21%); speed is in hundredths of km/h (`2072` = 20.72 km/h).
+Reads leave bits 4–7 clear. A write includes the last value read, so a stale
+editor cannot overwrite a change made by another client.
+
+Reply status bits are `0x00` success, `0x10` stale expected value, `0x20`
+editing blocked, or `0x30` invalid value/storage failure. Writes require
+Wheelie disarmed, Neutral, a stopped motor and no active setup session.
+
+Standard CAN ID **201** selects the drive mode in byte 0 (`0` Reverse,
+`1` Neutral, `2` Mode 1, `3` Mode 2, `4` Mode 3) and the light in byte 1.
+Use the same eight-byte payload as CU Core ESC. A legacy 3Shul display does
+not need this command: CU Wheelie boots in Mode 3, assistance disarmed.
+
+Standard CAN ID **202** is reserved for the Dash/Core status protocol. It
+does **not** arm Wheelie. VL Bike 39P uses ID 202 for a different wheelie
+payload; that format must not be sent as a substitute for the 3Shul commands
+above. A display using it needs a protocol adapter.
+
+*3ShulMotors Wheelie Assist — CAN protocol v1, with CU extensions*

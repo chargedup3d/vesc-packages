@@ -20,17 +20,17 @@
 (read-eval-program core-motor-wizard)
 (import "lib/cu_common/cu_values_transport.lisp" 'values-transport)
 (read-eval-program values-transport)
-@const-start
 (def power-proc-sid proc-sid)
-(defun proc-sid (id b) (if (and (= id (+ 0x500 (can-local-id))) (base-power-rx b 1)) nil (power-proc-sid id b)))
 (def core-proc-data-rx proc-data-rx)
+@const-start
+(defun proc-sid (id b) (if (and (= id (+ 0x500 (can-local-id))) (base-power-rx b 1)) nil (power-proc-sid id b)))
 (defun proc-data-rx (b) (if (not (base-power-rx b 2)) (if (not (ms-ble-rx b)) (core-proc-data-rx b))))
 @const-end
 (import "lib/wheelie_control/adc_config/adc_config.bin" 'core-values-native)
 (import "motor_wizard/motor_wizard.bin" 'core-motor-native)
 @const-start
-(def base-version "1.5.0-motor-wizard7")
-(def build-id "esc-1.5.0-motor-wizard7")
+(def base-version "1.5.1-mode-store")
+(def build-id "esc-1.5.1-mode-store")
 (defun display-event (ev) nil)
 (defun display-stop () nil)
 (defun base-status () (print (list "base" base-version drive-mode light-on cruise-on

@@ -38,3 +38,17 @@ Select a compatible ANT BMS on the package page to read its data over Bluetooth.
 
 See `LICENSE` for the original notice, `LICENSE.txt` for the full GPLv3 terms
 and `NOTICE.txt` for credits.
+
+## Build from source
+
+Requires Python 3.9+, Make and VESC Tool.
+Build from the root of the full repository so the shared `tools/` folder is
+included:
+
+```sh
+make -C cu_io VESC_TOOL=/path/to/vesc_tool
+```
+
+Output: `cu_io/cu_io.vescpkg`. See the
+[build options](https://github.com/chargedup3d/vesc-packages#build-from-source)
+for tool paths, versioning and archive builds.

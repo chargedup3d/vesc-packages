@@ -1,0 +1,43 @@
+{
+  "lib/wheelie_control/motor_setup.lisp": [
+    "ms-command",
+    "ms-measure",
+    "ms-save-adc",
+    "ms-restore",
+    "ms-worker",
+    "ms-stable-channel"
+  ],
+  "lib/wheelie_control/hall_check.lisp": [
+    "hc-command",
+    "hd-begin",
+    "hd-worker"
+  ],
+  "lib/wheelie_control/imu_setup.lisp": [
+    "im-command"
+  ],
+  "lib/cu_common/cu_basic_values.lisp": [
+    "bs-save",
+    "bs-load",
+    "bs-read-bank",
+    "bs-caps-read",
+    "bs-field-valid",
+    "bs-valid",
+    "bs-apply",
+    "bs-preview",
+    "bs-pack",
+    "bs-unpack"
+  ],
+  "motor_wizard.lisp": [
+    "mw-run",
+    "mw-worker",
+    "mw-restore"
+  ],
+  "lib/cu_common/cu_drive_modes.lisp": [
+    "base-commit-modes",
+    "base-load",
+    "base-read-bank",
+    "base-save-modes",
+    "save-modes-checked",
+    "base-capture"
+  ]
+}

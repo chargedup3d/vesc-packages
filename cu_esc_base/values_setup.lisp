@@ -1,11 +1,12 @@
 ; Core adapter for shared motor, Hall, ADC, IMU and Values setup.
 ; Core owns profile arbitration and a temporary zero-watt service guard.
-@const-start
 (def clamp base-clamp)
 (def core-service-watts nil)
 (def core-apply-drive-mode apply-drive-mode)
 (def core-proc-sid proc-sid)
 (def core-ms-command ms-command) (def core-hc-command hc-command)
+; Keep aliases to existing flash closures; do not copy their bodies again.
+@const-start
 (defun setup-disarmed () (and (= drive-mode 1) (not profile-suspend)))
 (defun setup-disarm () { (setq drive-mode 1) (setq cruise-on 0) })
 ; Default Charged Up CAN IMU address; absent sensors report unavailable.

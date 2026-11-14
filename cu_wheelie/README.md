@@ -5,8 +5,8 @@ reduce throttle as the front rises and apply pull-down current above the
 configured ceiling.
 
 Requires **VESC firmware 7.00**, a working IMU and supported ADC throttle/brake
-controls. It replaces CU Core ESC on the controller. CU Wheelie does not
-include CU Core ESC's editable Power Modes table or Motor Wizard.
+controls. It replaces CU Core ESC on the controller and includes its Power
+Modes, Motor Wizard and calibration services.
 
 ## Install and set up
 
@@ -27,6 +27,40 @@ Assistance starts disarmed. Check throttle, brake and sensor direction with
 the bike secured before riding. Arm from the **Live** tab with both controls
 released and the bike upright. Assistance cannot guarantee a maximum angle or
 prevent a fall.
+
+## Power modes
+
+The **Power Modes** tab, CUP-3.5 screen and Charged Up iOS app edit the same
+saved power and speed limits. Disarm Wheelie, select **N**, stop the motor and
+end any setup session before saving. The editor reads the limits back before
+confirming a save.
+
+| Mode | Default power | Default speed limit |
+| --- | --- | --- |
+| Reverse | 50% | 15 km/h |
+| 1 | 50% | 20 km/h |
+| 2 | 60% | 25 km/h |
+| 3 | 100% | 250 km/h |
+
+CU Wheelie starts in **Mode 3 with assistance disarmed**, so a 3Shul display
+can still arm it without sending a separate mode command. Mode 3's high default
+leaves the controller's original speed limit in effect. Set limits for your
+vehicle before riding.
+
+Drive and brake percentages limit the controller's configured current scales;
+they cannot raise its underlying limits. Speed is stored in km/h. Wheelie
+assistance uses the selected mode's limits, including its brake-current scale
+for pull-down while moving forward. Kids caps can reduce power and speed
+further. The last applied limits remain if the screen disconnects.
+
+Neutral disarms assistance, blocks drive and retains braking. Reverse requires
+assistance disarmed, a stopped motor and released controls. Cruise is disabled
+while CU Wheelie is installed.
+
+Mode limits are temporary motor settings. Before editing or backing up the
+underlying motor configuration in VESC Tool, remove CU Wheelie, restart and
+read the settings again. Reinstall and power-cycle afterward. Use the mode
+editor for ordinary power and speed changes.
 
 ## Tuning
 
@@ -95,26 +129,54 @@ throttle released for 2 seconds while moving over 3 mph and slowing.
 Change these on the Tune tab. The Live tab shows brake-light status and
 deceleration; the light indicator is not a brake-lever reading.
 
-## Screen setup
+## Motor Wizard and screen setup
 
-CUP-3.5 **Detection and Setup → VALUES** can save battery series, motor current
-and battery current through direct controller Bluetooth or a compatible CAN
-link. Setup requires Neutral, a stopped motor and the UART-only application.
-Confirm the selected controller before saving.
+Use CUP-3.5 **Detection and Setup** through direct controller Bluetooth or a
+compatible Charged Up CAN link. Disarm Wheelie, select Neutral and stop the
+motor before starting. Setup holds drive output until **END**.
 
-Each saved field is read back and stored in package EEPROM. Motor tuning and
-voltage cutoffs are unchanged. A lost setup connection keeps drive output held
-until the connection returns and you tap **END**. This package also provides
-its motor, Hall, ADC and IMU setup services; Motor Wizard belongs to CU Core ESC.
+Motor Wizard uses VESC Tool's motor-size presets and native measurements.
+Detection can rotate the motor. Secure it and keep clear before starting.
+A successful detection saves the tune after checking and reading it back.
+It preserves application settings, battery limits, speed settings and switching
+frequency. It may lower motor current to the preset's limit, but cannot raise
+the existing caps. Encoder setups are rejected; failed Hall detection does not
+replace an existing Hall tune with sensorless operation.
+
+**STOP** or a lost setup connection cancels detection and restores the previous
+configuration. Wait for **END** while measurements stop. If restoration fails,
+output stays held and **END** retries it.
+
+Motor previews and Hall checks do not save a tune. Throttle/brake calibration
+saves verified endpoints without enabling ADC control. **VALUES** saves battery
+series, motor current and battery current with readback; it leaves voltage
+cutoffs unchanged. VALUES requires the UART-only application. Confirm the
+selected controller before saving.
 
 The [CAN display protocol](WHEELIE_CAN_PROTOCOL.md) documents status, settings
 and arm/disarm messages. `(imu-diagnostics)` in the controller Lisp console
 reports IMU faults, gaps and dropped or duplicate frames for support.
 
+## Build from source
+
+Requires Python 3.9+, Make and VESC Tool. Also install `arm-none-eabi-gcc`
+and `arm-none-eabi-objcopy` for the native helpers.
+Build from the root of the full repository so the shared `tools/` folder is
+included:
+
+```sh
+make -C cu_wheelie VESC_TOOL=/path/to/vesc_tool
+```
+
+Output: `cu_wheelie/cu_wheelie.vescpkg`. See the
+[build options](https://github.com/chargedup3d/vesc-packages#build-from-source)
+for tool paths, versioning and archive builds.
+
 ## Credits and license
 
 Based on **Wheelie Assist 1.0.0 by [3ShulMotors](https://3shulmotors.com)**.
-CU Wheelie adds CU IMU input, source selection, connection handling
-and the Charged Up interface.
+CU Wheelie adds CU IMU input, source selection, connection handling, shared
+power modes, setup services and the Charged Up interface. Motor Wizard presets
+follow [VESC Tool](https://github.com/vedderb/vesc_tool/blob/53dd253c9e3b60a38584d776d4dadcc14b51b0a4/mobile/SetupWizardFoc.qml).
 
 GPL-3.0. See `LICENSE.txt` for license and warranty terms.

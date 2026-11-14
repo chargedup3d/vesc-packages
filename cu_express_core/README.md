@@ -45,6 +45,20 @@ change the Express T's channel; disconnect it while using the screen link.
 If the link remembers another screen, turn that screen off and forget its
 pairing before trying again.
 
+## Build from source
+
+Requires Python 3.9+, Make and VESC Tool.
+Build from the root of the full repository so the shared `tools/` folder is
+included:
+
+```sh
+make -C cu_express_core VESC_TOOL=/path/to/vesc_tool
+```
+
+Output: `cu_express_core/cu_express_core.vescpkg`. See the
+[build options](https://github.com/chargedup3d/vesc-packages#build-from-source)
+for tool paths, versioning and archive builds.
+
 ## License
 
 GPL-3.0-or-later. See `LICENSE.txt` and `NOTICE.txt` for terms and credits.

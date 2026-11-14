@@ -1,18 +1,29 @@
 (import "version.lisp" 'cu-package-version-data)
 (read-eval-program cu-package-version-data)
+(import "lib/cu_common/cu_esc_core.lisp" 'wheelie-esc-core)
+(read-eval-program wheelie-esc-core)
+(import "lib/cu_common/cu_drive_modes.lisp" 'wheelie-drive-modes)
+(read-eval-program wheelie-drive-modes)
 (import "motor_setup.lisp" 'code-motor-setup)
 (read-eval-program code-motor-setup)
 (import "imu_setup.lisp" 'code-imu-setup)
 (read-eval-program code-imu-setup)
 (import "lib/cu_common/cu_basic_values.lisp" 'code-basic-setup)
 (read-eval-program code-basic-setup)
-(import "lib/cu_common/cu_values_transport.lisp" 'values-transport)
-(read-eval-program values-transport)
 (import "adc_config/adc_config.bin" 'ms-adc-native)
 (import "hall_check.lisp" 'code-hall-check)
 (read-eval-program code-hall-check)
+(import "values_setup.lisp" 'wheelie-values-setup)
+(read-eval-program wheelie-values-setup)
+(import "motor_wizard.lisp" 'wheelie-motor-wizard)
+(read-eval-program wheelie-motor-wizard)
+(import "lib/cu_common/cu_values_transport.lisp" 'values-transport)
+(read-eval-program values-transport)
+(import "motor_wizard/motor_wizard.bin" 'wheelie-motor-native)
+(import "drive_modes.lisp" 'wheelie-drive-adapter)
+(read-eval-program wheelie-drive-adapter)
 @const-start
-(def whl-version "0.2.8-imu1")
+(def whl-version "0.3.0-modes1")
 (def whl-magic 1464685313)
 (def whl-start   25.0)
 (def whl-end     45.0)
@@ -266,7 +277,7 @@ t
 (cond
 ((or (= mode 0) (and (= mode 2) (= whl-armed 1))) (setvar 'whl-armed 0))
 ((and (or (= mode 1) (= mode 2)) (not hc-lock) (not ms-lock)
-(whl-input-config) (not whl-brake-hold)
+(whl-drive-ready) (whl-input-config) (not whl-brake-hold)
 (< (clamp (get-adc-decoded 0) 0.0 1.0) thr-db)
 (< (whl-brake-input) thr-db) (> (pick-src) 0)
 (< whl-pitch whl-start) (< (abs whl-roll) (- crash-roll 10.0)))
@@ -301,6 +312,7 @@ t
 (= (bufget-u8 data 0) whl-mark))
 (let ((cmd (bufget-u8 data 1)))
 (cond
+((and (= cmd 0x32) (= (buflen data) 8)) (base-power-rx data 1))
 ((and (= cmd 0x31) (= (buflen data) 8)) (ms-command data))
 ((and (= cmd 0x30) (= (buflen data) 8)) (hc-command data))
 ((= cmd whl-cmd-read-all) (whl-can-send-all))
@@ -446,29 +458,30 @@ t
 (defun handle-rx (data)
 (progn
 (setvar 'rt-want-t (systime))
-(if (and (not (ms-ble-rx data)) (>= (buflen data) 1))
+(if (and (not (base-power-rx data 2)) (not (ms-ble-rx data)) (>= (buflen data) 1))
 (let ((cmd (bufget-u8 data 0)))
 (cond
 ((= cmd 1) (send-conf))
 ((and (= cmd 2) (>= (buflen data) 25)) (apply-set data))
 ((= cmd 3) (whl-can-arm 2))
-(t nil))))))
+(t (proc-data-rx data)))))))
 (defun event-loop ()
 (loopwhile t
 (recv
-((event-data-rx . (? data)) (handle-rx data))
+((event-data-rx . (? data)) (trap (handle-rx data)))
 ((event-can-sid . ((? id) . (? data)))
 (if (= id (+ 0x5A0 ex-offset))
 (progn
 (ex-handle data)
 (if ctrl-pid (send ctrl-pid 'frame)))
-(progn (im-rx id data) (whl-can-handle id data))))
+(trap (proc-sid id data))))
 (_ nil))))
-(def slow-t 0)
+(def slow-t 0) (def whl-rt-t 0) (def whl-can-telem-t 0)
 (defun telem-loop ()
 (loopwhile t
 (progn
-(if (rt-wanted) (send-data (str-merge "rt "
+(if (and (rt-wanted) (>= (secs-since whl-rt-t) 0.04))
+(progn (setq whl-rt-t (systime)) (send-data (str-merge "rt "
 (str-from-n whl-pitch "%.2f ")
 (str-from-n prate-f   "%.1f ")
 (str-from-n whl-armed "%d ")
@@ -486,13 +499,9 @@ t
 (str-from-n ex-roll  "%.2f ")
 (str-from-n ex-flags "%d ")
 (str-from-n whl-brake "%d ")
-(str-from-n br-decel "%.2f"))))
+(str-from-n br-decel "%.2f")))))
 (brake-update)
-(if (> whl-can-telem-rate 0)
-(progn
-(setvar 'whl-can-telem-cnt (+ whl-can-telem-cnt 1))
-(if (>= whl-can-telem-cnt whl-can-telem-rate)
-(progn (setvar 'whl-can-telem-cnt 0) (whl-can-send-telem) (whl-can-send-attitude)))))
+(whl-can-telem-step)
 (if (>= (secs-since slow-t) 0.1)
 (progn
 (setvar 'slow-t (systime))
@@ -503,7 +512,7 @@ t
 (setvar 'ex-drops-ps (- ex-drops ex-drops-last))
 (setvar 'ex-drops-last ex-drops)))
 nil))
-(sleep 0.04))))
+(sleep 0.02))))
 (def last-step-t 0)
 (def ua-sum 0.0)
 (def ua-n 0)
@@ -512,13 +521,15 @@ nil))
 (if (>= a 0.999) 1.0
 (- 1.0 (exp (* steps (log (- 1.0 a)))))))
 (defun wheelie-step ()
-(progn
+; Serialize the output decision with mode changes and setup reservations.
+(atomic (if (not (or core-service-watts ms-lock hc-lock)) (progn
+(if (not (whl-drive-ready)) (setvar 'whl-armed 0))
 (if (and (not (whl-input-config)) (= whl-armed 1)) {
 (setvar 'whl-armed 0)
 (setvar 'whl-brake-hold t)
 (setvar 'whl-brake-release (systime))
 })
-(var inputs (atomic {
+(var inputs (progn {
 (var pair (list (ex-copy) ex-pending-gap))
 (setvar 'ex-pending-gap nil)
 pair
@@ -631,7 +642,7 @@ pair
 (progn
 (setvar 'whl-out 0.0)
 (if (= whl-ctrl 1)
-(progn (app-disable-output 0) (setvar 'whl-ctrl 0))))))))))
+(progn (app-disable-output 0) (setvar 'whl-ctrl 0))))))))))))
 (defun control-step () { (hd-guard) (ms-guard) (if ms-lock (ms-hold) (if hc-lock (hc-hold) (wheelie-step))) })
 (def ctrl-pid nil)
 (defun control-loop ()
@@ -704,7 +715,9 @@ ex-flags whl-brake br-decel))
 (if (= log-on 1) (log-sample))
 (sleep (/ 1.0 log-hz)))))
 (defun main () {
+(load-native-lib lib-cmd-proc)
 (ms-init) (im-init) (hc-init)
+(base-load)
 (if (let ((m (eeprom-read-i 0))) (and m (= m whl-magic)))
 (whl-load)
 (whl-save))
@@ -730,6 +743,18 @@ ex-flags whl-brake br-decel))
 (setvar 'ms-save-native-ok (and (eq (car ms-probe-result) 'exit-ok) (= (ix ms-probe-result 1) 1)))
 })
 (trap (bs-load))
+(base-capture)
+(var motor-native (trap (load-native-lib wheelie-motor-native)))
+(if (and base-ready (eq (car motor-native) 'exit-ok) (ix motor-native 1)) {
+    (var probe (trap (ext-mw-transaction 0)))
+    (setq mw-ready (and (eq (car probe) 'exit-ok) (= (ix probe 1) 1)))
+})
+(setq esc-kid-handler base-kid-frame) (setq esc-capabilities 3)
+; A legacy 3Shul display only sends wheelie commands. Start in Mode 3 so
+; it can still arm without a new mode-selection command; assistance is off.
+(setq drive-mode 4) (apply-drive-mode drive-mode)
+(esc-core-workers)
+(loopwhile-thd ("Drive caps" 180) t { (apply-drive-mode drive-mode) (sleep 0.1) })
 (event-register-handler (spawn event-loop))
 (event-enable 'event-data-rx)
 (event-enable 'event-can-sid)

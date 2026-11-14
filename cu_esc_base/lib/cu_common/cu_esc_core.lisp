@@ -242,6 +242,10 @@
         (event-enable 'event-shutdown)
         (event-enable 'event-data-rx)
 
+        (esc-core-workers)
+})
+
+(defun esc-core-workers () {
         ; the status frames, as dash_esc sends them
         (var buf-can (array-create 8))
         (var buf-out (array-create 9))   ; send-frame's mirror

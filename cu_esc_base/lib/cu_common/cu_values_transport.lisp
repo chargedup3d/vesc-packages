@@ -1,8 +1,9 @@
 ; CAN and direct VESC custom-app/BLE share the same setup workers.
 ; A held session belongs to its original route until explicit END.
+; These handlers already live in flash. Preserve their references.
+(def ms-handle ms-command) (def hc-handle hc-command)
 @const-start
 (def ms-route 0) (def ms-ble-t 0) (def hc-route 0)
-(def ms-handle ms-command) (def hc-handle hc-command)
 (defun ms-ble-active () (and (> ms-ble-t 0) (< (secs-since ms-ble-t) 2.0)))
 (defun ms-wire-valid (b) (and (= (buflen b) 8)
     (= (bufget-u8 b 0) 0x57) (= (bufget-u8 b 1) 0x31)))

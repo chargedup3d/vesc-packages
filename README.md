@@ -29,7 +29,8 @@ power and speed limits.
 
 For **CU Wheelie**, install it on the motor controller and install
 CU IMU on the matching sensor board. CU Core ESC and CU Wheelie replace one
-another. CU Wheelie does not include CU Core ESC's mode editor or Motor Wizard.
+another. CU Wheelie includes the same Power Modes editor, Motor Wizard and
+calibration services, with wheelie assistance added.
 
 Dash updates a CUP-3.5 screen with Charged Up screen firmware and the enlarged
 Lisp partition already installed. Express Link, IO Link and CU IMU require
@@ -86,6 +87,12 @@ including after header, linker-script or compiler-option changes. A failed
 compile stops packaging and leaves the previous package intact. Successful
 builds update the helper binaries beside their sources. To use a toolchain
 outside PATH, set `CROSS_COMPILE=/path/to/arm-none-eabi-` when running Make.
+
+CU Core ESC and CU Wheelie also use `compact_setup.json` to bundle selected
+setup routines as source imports, parsed when called. This keeps them within
+the controller's compiled-storage limit. The build generates these imports
+in its temporary folder; use Make when packaging either controller package.
+The riding control loop, IMU receiver and output guards remain resident.
 
 ## Licenses and credits
 

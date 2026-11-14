@@ -8,8 +8,11 @@ original copyright and license notices.
 Based on Wheelie Assist 1.0.0 by 3ShulMotors (GPL-3.0).
 https://3shulmotors.com
 
-Charged Up adds external IMU support, source selection, connection handling
-and the Charged Up interface.
+Charged Up adds external IMU support, source selection, connection handling,
+power modes, controller setup and the Charged Up interface.
 
 The VESC native interface header, vesc_c_if.h, is Copyright 2022 Benjamin
 Vedder and licensed under GPL-3.0-or-later. Its original notice is retained.
+
+Motor Wizard presets follow VESC Tool:
+https://github.com/vedderb/vesc_tool/blob/53dd253c9e3b60a38584d776d4dadcc14b51b0a4/mobile/SetupWizardFoc.qml

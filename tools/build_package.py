@@ -10,6 +10,7 @@ import tempfile
 import zlib
 
 from minify import balanced, strip
+from compact_setup import compact_setup, setup_manifest
 
 
 GENERATED = ('README-gen.md', 'ui.qml', 'version.lisp')
@@ -85,6 +86,10 @@ def main():
     if Path(output).name != output or not output.endswith('.vescpkg'):
         parser.error('pkgOutput must be a .vescpkg filename in the package folder')
     native = [directory.relative_to(source) for directory in native_directories(source)]
+    setup = setup_manifest(source)
+    for filename in setup:
+        if not (source / filename).is_file() or '..' in Path(filename).parts or Path(filename).is_absolute():
+            raise ValueError('Invalid setup source: ' + filename)
     if args.clean:
         (source / output).unlink(missing_ok=True)
         for name in GENERATED:
@@ -118,14 +123,26 @@ def main():
             if not binaries or any(path.stat().st_size == 0 for path in binaries):
                 raise ValueError('Native build produced no usable binary: ' + str(directory))
             native_outputs += binaries
-        for path in work.rglob('*.lisp'):
+        setup_sources = {}
+        for path in sorted(work.rglob('*.lisp')):
             text = path.read_text()
             if not balanced(text):
                 raise ValueError('Unbalanced Lisp source: ' + str(path.relative_to(work)))
             compact = strip(text)
+            compact = compact_setup(compact, setup.get(path.relative_to(work).as_posix(), []), setup_sources)
             if not balanced(compact):
                 raise ValueError('Invalid Lisp after minifying: ' + str(path.relative_to(work)))
             path.write_text(compact)
+        if setup_sources:
+            entry = work / re.search(r'pkgLisp:\s*"([^"]+)"', descriptor)[1]
+            assets = work / 'setup_sources'
+            assets.mkdir()
+            imports = []
+            for symbol, contents in sorted(setup_sources.items()):
+                filename = 'setup_sources/' + symbol + '.bin'
+                (work / filename).write_bytes(contents.encode('utf-8') + b'\0')
+                imports.append('(import "' + filename + '" \'' + symbol + ')')
+            entry.write_text('\n'.join(imports) + '\n' + entry.read_text())
         subprocess.run([executable, '--buildPkgFromDesc', 'pkgdesc.qml'],
             cwd=work, env={**os.environ, 'QT_QPA_PLATFORM': 'offscreen'}, check=True)
         package = work / output

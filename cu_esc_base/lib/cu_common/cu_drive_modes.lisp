@@ -30,15 +30,69 @@
         (/ (* (conf-get 'si-motor-poles) 0.5 60.0 (conf-get 'si-gear-ratio))
            (* (conf-get 'si-wheel-diameter) 3.14159265)) 0.0))
 
-; Preserve the established 13-value Dash ESC mode-table order and slots 8-20.
-(defun base-load () {
-    (if (or (base-marker 0 240) (base-marker 0 1129661773i32))
-        (looprange i 0 13 {
-            (var v (eeprom-read-f (+ 8 i)))
-            (var speed (or (= i 0) (= i 4) (= i 7) (= i 10)))
-            (if (and v (>= v (if speed 1.0 0.0)) (<= v (if speed 250.0 1.0)))
-                (setix base-modes i v))
+; Mode banks 64..95 do not overlap Wheelie (0..22), Values (32..41)
+; or kids caps (200..203). Commit a whole table, marker last; a partial write
+; leaves the previous bank valid. The 13-field wire format is unchanged.
+(def base-bank -1) (def base-generation 0)
+(def base-mode-magic 1129661774i32)
+(defun base-table-valid (values) {
+    (var good (= (length values) 13))
+    (if good (looprange i 0 13 {
+        (var v (ix values i))
+        (var speed (or (= i 0) (= i 4) (= i 7) (= i 10)))
+        (if (not (and (number? v) (>= v (if speed 1.0 0.0))
+                     (<= v (if speed 250.0 1.0)))) (setq good nil))
+    })) good
+})
+(defun base-read-bank (bank) {
+    (var at (+ 64 (* bank 16))) (var seq (eeprom-read-i (+ at 1)))
+    (var values (map (fn (i) (eeprom-read-f (+ at 2 i))) (range 0 13)))
+    (if (and (base-marker at base-mode-magic) (base-marker (+ at 15) base-mode-magic)
+             seq (>= seq 1) (<= seq 65535) (base-table-valid values))
+        (list seq values) nil)
+})
+(defun base-commit-modes (values) {
+    (if (not (base-table-valid values)) nil {
+        (var bank (if (= base-bank 0) 1 0)) (var at (+ 64 (* bank 16)))
+        (var seq (+ 1 (mod base-generation 65535)))
+        (var result (trap {
+            (if (not (and (eeprom-store-i at 0) (base-marker at 0)
+                         (eeprom-store-i (+ at 1) seq))) (exit-error 'mode-store))
+            (looprange i 0 13 {
+                (var v (to-float (ix values i)))
+                (if (not (eeprom-store-f (+ at 2 i) v)) (exit-error 'mode-store))
+                (var back (eeprom-read-f (+ at 2 i)))
+                (if (not (and back (< (abs (- v back)) 0.00001))) (exit-error 'mode-readback))
+            })
+            (if (not (and (base-marker (+ at 1) seq)
+                         (eeprom-store-i (+ at 15) base-mode-magic)
+                         (base-marker (+ at 15) base-mode-magic)
+                         (eeprom-store-i at base-mode-magic))) (exit-error 'mode-store))
+            (var back (base-read-bank bank))
+            (if (not (and back (= (ix back 0) seq))) (exit-error 'mode-readback))
+            (setq base-bank bank) (setq base-generation seq)
+            (setq base-modes (ix back 1)) (setq base-last nil) t
         }))
+        (and (eq (car result) 'exit-ok) (ix result 1))
+    })
+})
+(defun base-load () {
+    (var a (base-read-bank 0)) (var b (base-read-bank 1))
+    (var newer (and b (or (not a) (and (> (mod (+ 65536 (- (ix b 0) (ix a 0))) 65536) 0)
+        (< (mod (+ 65536 (- (ix b 0) (ix a 0))) 65536) 32768)))))
+    (var chosen (if newer b a))
+    (if chosen {
+        (setq base-bank (if newer 1 0)) (setq base-generation (ix chosen 0))
+        (setq base-modes (ix chosen 1))
+    } {
+        ; Read the old Dash/Core layout only with its own marker. Never
+        ; mistake Wheelie's IMU/crash settings for a mode table.
+        (if (or (base-marker 0 240) (base-marker 0 1129661773i32)) {
+            (var legacy (map (fn (i) (eeprom-read-f (+ 8 i))) (range 0 13)))
+            (if (base-table-valid legacy)
+                (if (not (base-commit-modes legacy)) (exit-error 'mode-migration-failed)))
+        })
+    })
     ; Separate marker: old packages never owned these slots. Store the on
     ; flag last, so a new cap is complete before it can become active.
     (if (base-marker 203 1129661771i32) {
@@ -66,17 +120,10 @@
             (if (not (and (number? v) (>= v (if speed 1.0 0.0))
                           (<= v (if speed 250.0 1.0)))) (setq good false))
         })
-        (if good {
-            (looprange i 0 13 {
-                (setix base-modes i (to-float (rest-args i)))
-                (base-save-f (+ 8 i) (base-mode-value i))
-            })
-            (eeprom-store-i 0 1129661773i32)
-            ; Apply on the profile loop after this custom-app reply, just as
-            ; field saves do. Native apply changes the command reply callback.
-            (setq base-last nil)
-            (send-data "msg Modes saved")
-        } (send-data "msg Invalid mode limits; nothing saved"))
+        (if good
+            (if (base-commit-modes (rest-args)) (send-data "msg Modes saved")
+                (send-data "msg Mode storage failed; reload before saving"))
+            (send-data "msg Invalid mode limits; nothing saved"))
     } (send-data "msg Expected 13 mode values; nothing saved"))
 }))
 
@@ -199,16 +246,10 @@
                 (t {
                     (var idx (base-mode-field-index m f))
                     (var v (/ (to-float want) (if (= f 4) 100.0 10000.0)))
-                    (base-save-f (+ 8 idx) v)
-                    ; A storage failure must not be presented as a saved value.
-                    (var stored (eeprom-read-f (+ 8 idx)))
-                    (if (and stored (< (abs (- stored v)) (if (= f 4) 0.0001 0.00001))) {
-                        (setix base-modes idx stored)
-                        (eeprom-store-i 0 1129661773i32)
-                        ; Let the periodic drive loop reapply after this reply. The native
-                        ; config command replaces the custom-app reply callback.
-                        (setq base-last nil)
-                    } (setq status 48))
+                    (var values (map (fn (x) x) base-modes))
+                    (setix values idx v)
+                    ; Reply before the periodic apply changes the command callback.
+                    (if (not (base-commit-modes values)) (setq status 48))
                 }))
         })
         (var reply (bufcreate 8))
